@@ -2,6 +2,7 @@
     "files.associations": {
         "tcp.h": "c",
         "list.h": "c",
-        "kernel.h": "c"
+        "kernel.h": "c",
+        "build_bug.h": "c"
     }
 }
