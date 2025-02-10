@@ -7,18 +7,35 @@ NDD: A provably fair and robust congestion controller
 
 #define NDD_DEBUG
 
-static const u64 S_TO_US = 1e6;
-static const u32 p_ub_rtprop_us = 100000;  // 100 ms
+#define P_SCALE 8	/* scaling factor for fractions in BBR (e.g. gains) */
+#define P_UNIT (1 << P_SCALE)
 
+static const u32 p_ub_rtprop_us = 100000;  // 100 ms
+static const u32 p_ub_rtterr_us = 10000;  // 10 ms
+static const u32 p_contract_min_qdel_us = p_ub_rtprop_us / 2;
+
+// TODO: check if these floating values make sense given the UNIT. Should we
+// change the unit?
+static const u32 p_cwnd_averaging_factor_unit = P_UNIT * 1 / 2;
+static const u32 p_cwnd_clamp_high_unit = P_UNIT * 6 / 5;
+static const u32 p_cwnd_clamp_low_unit = P_UNIT * 11 / 10;
+static const u32 p_probe_multiplier_unit = P_UNIT * 4;
+static const u32 p_probe_duration = p_ub_rtterr_us; // ? Do we want something else here?
 
 static u32 id = 0;
 struct ndd_data {
 	u32 id;
 
 	// State variables
-	bool s_probe_ongoing;
+	u64 s_min_rtprop_us;
 
-	u32 s_min_rtt_us;
+	u32 s_round_min_rtt_us;
+	u32 s_round_max_rate_pps;  // packets per second (1500 bytes per sec to 6.44 Terabytes per second)
+	u32 s_slot_max_qdel_us;
+
+	bool s_probe_ongoing;
+	u32 s_probe_min_excess_delay_us;
+	u32 s_probe_prev_cwnd_pkts;
 };
 
 static void ndd_init(struct sock *sk)
@@ -42,9 +59,68 @@ static bool ndd_valid(struct ndd_data *ndd)
 	return (ndd);
 }
 
-static void update_estimates(struct ndd_data *ndd, struct tcp_sock *tsk, u32 rtt_us) {
-	ndd->s_min_rtt_us = min_t(u32, ndd->s_min_rtt_us, rtt_us);
+static void update_estimates(struct ndd_data *ndd, struct tcp_sock *tsk, struct rate_sample *rs, u32 rtt_us) {
+	u32 this_qdel = rtt_us - ndd->s_min_rtprop_us;
 
+	ndd->s_min_rtprop_us = min_t(u32, ndd->s_min_rtprop_us, rtt_us);
+	ndd->s_round_min_rtt_us = min_t(u32, ndd->s_round_min_rtt_us, rtt_us);
+
+	if (ndd->s_probe_ongoing && part_of_probe(ndd, tsk)) {
+		u32 this_excess_delay_us = rtt_us - ndd->s_round_min_rtt_us;
+		ndd->s_probe_min_excess_delay_us = min_t(u32, ndd->s_probe_min_excess_delay_us, this_excess_delay_us);
+	}
+	else {
+		ndd->s_slot_max_qdel_us = max_t(u32, ndd->s_slot_max_qdel_us, this_qdel);
+		// TODO: Should we use the rate sample here?
+		u64 this_rate_pps = tsk->snd_cwnd * USEC_PER_SEC / rtt_us;
+		ndd->s_round_max_rate_pps = max_t(u64, ndd->s_round_max_rate_pps, this_rate_pps);
+	}
+}
+
+static void reset_round_estimates(struct ndd_data *ndd) {
+	ndd->s_round_min_rtt_us = U32_MAX;
+	ndd->s_round_max_rate_pps = 0;
+}
+
+static bool part_of_probe(struct ndd_data *ndd, struct tcp_sock *tsk) {
+
+}
+
+static u32 get_initial_rtt(struct tcp_sock *tsk) {
+	// Get initial RTT - as measured by SYN -> SYN-ACK.  If information
+	// does not exist - use U32_MAX as RTT
+	u32 rtt_us;
+	if (tsk->srtt_us) {
+		rtt_us = max_t(u32, tsk->srtt_us >> 3, 1U);
+	} else {
+		rtt_us = U32_MAX;
+	}
+	return rtt_us;
+}
+
+static bool probe_ended() {
+
+}
+
+static bool cruise_ended() {
+}
+
+static void update_state_after_probe_end(struct ndd_data *ndd) {
+	ndd->s_probe_ongoing = false;
+	ndd->s_probe_min_excess_delay_us = U32_MAX;
+}
+
+static void update_cwnd(struct ndd_data *ndd, struct tcp_sock *tsk) {
+
+}
+
+static void start_probe(struct ndd_data *ndd, struct tcp_sock *tsk) {
+	ndd->s_probe_ongoing = true;
+	ndd->s_probe_min_excess_delay_us = U32_MAX;
+	u32 qdel_us = ndd->s_round_min_rtt_us - ndd->s_min_rtprop_us;
+	u32 target_flow_count = qdel_us / p_contract_min_qdel_us;
+	u32 excess_bytes =
+	ndd->s_probe_prev_cwnd_pkts = tsk->snd_cwnd;
 }
 
 static void ndd_cong_ctrl(struct sock *sk, const struct rate_sample *rs)
@@ -52,31 +128,36 @@ static void ndd_cong_ctrl(struct sock *sk, const struct rate_sample *rs)
 	struct ndd_data *ndd = inet_csk_ca(sk);
 	struct tcp_sock *tsk = tcp_sk(sk);
 	u32 rtt_us;
-	u64 timestamp;
-	bool app_limited;
+	u64 now_us = tsk->tcp_mstamp;
 	// u32 latest_inflight_segments = rs->prior_in_flight;
 
-	if (!ndd_valid(ndd))
+	// Is struct valid? Is rate sample valid? Is RTT valid?
+	if (!ndd_valid(ndd) || rs->delivered < 0 || rs->interval_us < 0 || rs->rtt_us < 0)
 		return;
 
-	// Is rate sample valid?
-	if (rs->delivered < 0 || rs->interval_us < 0)
-		return;
+	rtt_us = rs->rtt_us;
+	update_estimates(ndd, tsk, rs, rtt_us);
 
-	// Get initial RTT - as measured by SYN -> SYN-ACK.  If information
-	// does not exist - use U32_MAX as RTT
-	if (tsk->srtt_us) {
-		rtt_us = max_t(u32, tsk->srtt_us >> 3, 1U);
-	} else {
-		rtt_us = p_ub_rtprop_us;
+	if (ndd->s_probe_ongoing && should_init_probe_end(ndd, tsk)) {
+		tsk->snd_cwnd = ndd->s_probe_prev_cwnd_pkts;
 	}
 
-	// if (rtt_us < ndd->min_rtt_us)
-	// 	ndd->min_rtt_us = rtt_us;
+	if (slot_ended(ndd, tsk, rtt_us)) {
+		if (ndd->s_probe_ongoing) {
+			update_state_after_probe_end(ndd);
+			update_cwnd(ndd, tsk);
+		}
+
+		if (round_ended(ndd, tsk)) {
+			reset_round_estimates(tsk);
+		}
+
+		if (should_probe(ndd, tsk)) {
+			start_probe(ndd, tsk);
+		}
+	}
 
 	// Update intervals
-	// timestamp = tsk->tcp_mstamp; // Most recent send/receive
-
 	// BUILD_BUG_ON(ndd_history_periods * 2 != ndd_num_intervals);
 	// if (tcp_stamp_us_delta(timestamp, ndd->last_update_tstamp) >= ndd->min_rtt_us) {
 	// ndd->intervals[ndd->intervals_head].pkts_acked = rs->acked_sacked;
