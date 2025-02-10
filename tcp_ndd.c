@@ -125,12 +125,17 @@ static void update_cwnd(struct ndd_data *ndd, struct tcp_sock *tsk) {
 }
 
 static void start_probe(struct ndd_data *ndd, struct tcp_sock *tsk) {
-	ndd->s_probe_ongoing = true;
-	ndd->s_probe_min_excess_delay_us = U32_MAX;
-	u32 qdel_us = ndd->s_round_min_rtt_us - ndd->s_min_rtprop_us;
-	u32 target_flow_count = qdel_us / p_contract_min_qdel_us;
-	u32 excess_bytes =
-	ndd->s_probe_prev_cwnd_pkts = tsk->snd_cwnd;
+  u32 qdel_us;
+  u32 target_flow_count;
+  u32 excess_pkts;
+
+  ndd->s_probe_ongoing = true;
+  ndd->s_probe_min_excess_delay_us = U32_MAX;
+  qdel_us = ndd->s_round_min_rtt_us - ndd->s_min_rtprop_us;
+  target_flow_count = qdel_us / p_contract_min_qdel_us;
+  excess_pkts =
+      p_probe_multiplier_unit * target_flow_count * ndd->s_round_max_rate_pps * p_ub_rtterr_us;
+  ndd->s_probe_prev_cwnd_pkts = tsk->snd_cwnd + excess_pkts;
 }
 
 static void ndd_cong_ctrl(struct sock *sk, const struct rate_sample *rs)
