@@ -7,11 +7,18 @@ NDD: A provably fair and robust congestion controller
 
 #define NDD_DEBUG
 
-#define S_TO_US ((u64) 1e6)
+static const u64 S_TO_US = 1e6;
+static const u32 p_ub_rtprop_us = 100000;  // 100 ms
+
 
 static u32 id = 0;
 struct ndd_data {
 	u32 id;
+
+	// State variables
+	bool s_probe_ongoing;
+
+	u32 s_min_rtt_us;
 };
 
 static void ndd_init(struct sock *sk)
@@ -35,6 +42,11 @@ static bool ndd_valid(struct ndd_data *ndd)
 	return (ndd);
 }
 
+static void update_estimates(struct ndd_data *ndd, struct tcp_sock *tsk, u32 rtt_us) {
+	ndd->s_min_rtt_us = min_t(u32, ndd->s_min_rtt_us, rtt_us);
+
+}
+
 static void ndd_cong_ctrl(struct sock *sk, const struct rate_sample *rs)
 {
 	struct ndd_data *ndd = inet_csk_ca(sk);
@@ -54,9 +66,9 @@ static void ndd_cong_ctrl(struct sock *sk, const struct rate_sample *rs)
 	// Get initial RTT - as measured by SYN -> SYN-ACK.  If information
 	// does not exist - use U32_MAX as RTT
 	if (tsk->srtt_us) {
-		rtt_us = max(tsk->srtt_us >> 3, 1U);
+		rtt_us = max_t(u32, tsk->srtt_us >> 3, 1U);
 	} else {
-		rtt_us = U32_MAX;
+		rtt_us = p_ub_rtprop_us;
 	}
 
 	// if (rtt_us < ndd->min_rtt_us)

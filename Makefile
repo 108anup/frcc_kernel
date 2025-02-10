@@ -1,5 +1,8 @@
 ifneq ($(KERNELRELEASE),)
 
+# For showing compiler flags
+# ccflags-y := $(ccflags-y) -xc -E -v
+
 # kbuild part of makefile
 obj-m  := tcp_ndd.o
 

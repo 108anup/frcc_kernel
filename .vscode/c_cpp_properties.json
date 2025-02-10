@@ -1,16 +1,34 @@
 {
+    // https://github.com/microsoft/vscode-cpptools/issues/5588#issuecomment-662116156
     "configurations": [
         {
             "name": "Linux",
             "includePath": [
                 "${workspaceFolder}/**",
-                "/usr/include/",
-                "/usr/local/include/",
                 "/usr/src/linux-headers-5.15.0-100-generic/include/",
-                "/usr/lib/gcc/x86_64-linux-gnu/11/include/",
-                "/usr/src/linux-headers-5.15.0-100-generic/arch/x86/include/"
+                "/usr/src/linux-headers-5.15.0-100-generic/include/uapi",
+                "/usr/src/linux-headers-5.15.0-100-generic/include/generated/uapi",
+                "/usr/src/linux-headers-5.15.0-100-generic/arch/x86/include/",
+                "/usr/src/linux-headers-5.15.0-100-generic/arch/x86/include/generated",
+                "/usr/src/linux-headers-5.15.0-100-generic/arch/x86/include/uapi",
+                "/usr/src/linux-headers-5.15.0-100-generic/arch/x86/include/generated/uapi",
+                "/usr/src/linux-headers-5.15.0-100-generic/ubuntu/include/",
+                "/usr/lib/gcc/x86_64-linux-gnu/11/include"
             ],
-            "defines": [],
+            "compilerArgs": [
+                "-nostdinc",
+                "-isystem",
+                "-include",
+                "/usr/src/linux-headers-5.15.0-100-generic/include/linux/kconfig.h",
+                "-include",
+                "/usr/src/linux-headers-5.15.0-100-generic/include/linux/compiler-version.h",
+                "-include",
+                "/usr/src/linux-headers-5.15.0-100-generic/include/linux/compiler_types.h"
+            ],
+            "defines": [
+                "__KERNEL__",
+                "MODULE"
+            ],
             "compilerPath": "/usr/bin/gcc",
             "cStandard": "c17",
             "cppStandard": "gnu++17",

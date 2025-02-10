@@ -3,6 +3,11 @@
         "tcp.h": "c",
         "list.h": "c",
         "kernel.h": "c",
-        "build_bug.h": "c"
+        "build_bug.h": "c",
+        "inet_hashtables.h": "c",
+        "route.h": "c",
+        "in.h": "c",
+        "byteorder.h": "c",
+        "types.h": "c"
     }
 }
