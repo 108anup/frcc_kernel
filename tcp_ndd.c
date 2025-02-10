@@ -54,12 +54,13 @@ static u32 ndd_get_mss(struct tcp_sock *tsk)
 }
 
 /* was the ndd struct fully inited */
-static bool ndd_valid(struct ndd_data *ndd)
-{
-	return (ndd);
+static bool ndd_valid(struct ndd_data *ndd) { return (ndd); }
+
+static bool part_of_probe(struct ndd_data *ndd, struct tcp_sock *tsk) {
+	return false;
 }
 
-static void update_estimates(struct ndd_data *ndd, struct tcp_sock *tsk, struct rate_sample *rs, u32 rtt_us) {
+static void update_estimates(struct ndd_data *ndd, struct tcp_sock *tsk, const struct rate_sample *rs, u32 rtt_us) {
 	u32 this_qdel = rtt_us - ndd->s_min_rtprop_us;
 
 	ndd->s_min_rtprop_us = min_t(u32, ndd->s_min_rtprop_us, rtt_us);
@@ -82,10 +83,6 @@ static void reset_round_estimates(struct ndd_data *ndd) {
 	ndd->s_round_max_rate_pps = 0;
 }
 
-static bool part_of_probe(struct ndd_data *ndd, struct tcp_sock *tsk) {
-
-}
-
 static u32 get_initial_rtt(struct tcp_sock *tsk) {
 	// Get initial RTT - as measured by SYN -> SYN-ACK.  If information
 	// does not exist - use U32_MAX as RTT
@@ -98,11 +95,24 @@ static u32 get_initial_rtt(struct tcp_sock *tsk) {
 	return rtt_us;
 }
 
-static bool probe_ended() {
-
+static bool probe_ended(struct ndd_data *ndd, struct tcp_sock *tsk, u32 rtt_us) {
+	return false;
 }
 
-static bool cruise_ended() {
+static bool cruise_ended(struct ndd_data *ndd, struct tcp_sock *tsk, u32 rtt_us) {
+  return false;
+}
+
+static bool should_init_probe_end(struct ndd_data *ndd, struct tcp_sock *tsk) {
+	return false;
+}
+
+static bool round_ended(struct ndd_data *ndd, struct tcp_sock *tsk) {
+	return false;
+}
+
+static bool should_probe(struct ndd_data *ndd, struct tcp_sock *tsk) {
+	return false;
 }
 
 static void update_state_after_probe_end(struct ndd_data *ndd) {
@@ -142,14 +152,14 @@ static void ndd_cong_ctrl(struct sock *sk, const struct rate_sample *rs)
 		tsk->snd_cwnd = ndd->s_probe_prev_cwnd_pkts;
 	}
 
-	if (slot_ended(ndd, tsk, rtt_us)) {
+	if (cruise_ended(ndd, tsk, rtt_us) || probe_ended(ndd, tsk, rtt_us)) {
 		if (ndd->s_probe_ongoing) {
 			update_state_after_probe_end(ndd);
 			update_cwnd(ndd, tsk);
 		}
 
 		if (round_ended(ndd, tsk)) {
-			reset_round_estimates(tsk);
+			reset_round_estimates(ndd);
 		}
 
 		if (should_probe(ndd, tsk)) {
