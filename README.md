@@ -7,3 +7,5 @@ Kernel implementation of the NDD congestion control algorithm
    (https://stackoverflow.com/a/77616138/5039326)
 3. Added compile_commands.json using bear. `bear -- make`. Earlier tried
    scripts/clang-tools/gen_compile_commands.py but that did not work.
+4. Moved compile_commands.json to a build directory so that `make clean` does
+   not remove it.

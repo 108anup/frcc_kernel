@@ -118,7 +118,7 @@ static void update_estimates(struct ndd_data *ndd, struct tcp_sock *tsk,
 {
 	u32 this_qdel = rtt_us - ndd->s_min_rtprop_us;
 	u32 init_rtt_us = get_initial_rtt(tsk);
-	u64 this_rate_pps = tsk->snd_cwnd * USEC_PER_SEC;
+	u64 this_rate_pps = tsk->snd_cwnd * USEC_PER_SEC; // TODO: Should we use the rs->delivered here?
 	do_div(this_rate_pps, rtt_us);
 
 	ndd->s_min_rtprop_us = min_t(u32, ndd->s_min_rtprop_us, init_rtt_us);
@@ -133,7 +133,6 @@ static void update_estimates(struct ndd_data *ndd, struct tcp_sock *tsk,
 	} else {
 		ndd->s_slot_max_qdel_us =
 			max_t(u32, ndd->s_slot_max_qdel_us, this_qdel);
-		// TODO: Should we use the rate sample here?
 		ndd->s_round_max_rate_pps =
 			max_t(u64, ndd->s_round_max_rate_pps, this_rate_pps);
 	}
@@ -316,6 +315,7 @@ static void update_cwnd(struct sock* sk, struct ndd_data *ndd, struct tcp_sock *
 		((p_cwnd_averaging_factor_unit * target_cwnd_unit) >> P_SCALE);
 	tsk->snd_cwnd = DIV_ROUND_UP_ULL(next_cwnd_unit, P_UNIT);
 
+	// TODO: should we use tsk->srtt instead of latest rtt_us?
 	next_rate_bps = 2 * tsk->snd_cwnd * ndd_get_mss(tsk) * USEC_PER_SEC;
 	do_div(next_rate_bps, rtt_us);
 	sk->sk_pacing_rate = next_rate_bps;
@@ -367,7 +367,7 @@ static void on_ack(struct sock *sk, const struct rate_sample *rs)
 
 static void ndd_release(struct sock *sk)
 {
-	struct ndd_data *ndd = inet_csk_ca(sk);
+	// struct ndd_data *ndd = inet_csk_ca(sk);
 	// kfree(ndd->intervals);
 }
 
