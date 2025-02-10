@@ -36,7 +36,9 @@ struct ndd_data {
 
 	u32 s_round_slots_till_now;
 	u32 s_round_min_rtt_us;
-	u32 s_round_max_rate_pps; // packets per second (1500 bytes per sec to 6.44 Terabytes per second)
+	u32 s_round_max_rate_pps;
+	// pps = packets per second, supports range: [1500 bytes per sec to
+	// 6.44 terabytes per second]
 
 	u32 s_slot_max_qdel_us;
 	u64 s_slot_start_time_us;
@@ -118,7 +120,8 @@ static void update_estimates(struct ndd_data *ndd, struct tcp_sock *tsk,
 {
 	u32 this_qdel = rtt_us - ndd->s_min_rtprop_us;
 	u32 init_rtt_us = get_initial_rtt(tsk);
-	u64 this_rate_pps = tsk->snd_cwnd * USEC_PER_SEC; // TODO: Should we use the rs->delivered here?
+	// TODO: Should we use the rs->delivered instead of snd_cwnd?
+	u64 this_rate_pps = tsk->snd_cwnd * USEC_PER_SEC;
 	do_div(this_rate_pps, rtt_us);
 
 	ndd->s_min_rtprop_us = min_t(u32, ndd->s_min_rtprop_us, init_rtt_us);
