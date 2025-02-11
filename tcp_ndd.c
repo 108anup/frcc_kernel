@@ -32,7 +32,7 @@ struct ndd_data {
 	u32 id;
 
 	// State variables
-	u64 s_min_rtprop_us;
+	u32 s_min_rtprop_us;
 
 	u32 s_round_slots_till_now;
 	u32 s_round_min_rtt_us;
@@ -376,12 +376,26 @@ static void log_cwnd_update(struct sock *sk, struct ndd_data *ndd,
 #endif
 }
 
-static void log_slot_end(struct ndd_data *ndd, struct tcp_sock *tsk, u32 rtt_us)
+static void log_slot_end(struct sock *sk, struct ndd_data *ndd,
+			 struct tcp_sock *tsk, u32 rtt_us, u64 now_us)
 {
-	// TODO: Implement this
+#ifdef NDD_DEBUG
+	printk(KERN_INFO
+	       "ndd slot_end_1 flow %u cwnd %u pacing %lu rtt %u mss %u ",
+	       ndd->id, tsk->snd_cwnd, sk->sk_pacing_rate, rtt_us,
+	       tsk->mss_cache);
+	printk(KERN_INFO "ndd slot_end_2 flow %u slot_start %llu slot_end %llu "
+			 "probing %u slots_till_now %u "
+			 "rtprop %u min_rtt %u max_rate %u max_qdel %u ",
+	       ndd->id, ndd->s_slot_start_time_us, now_us, ndd->s_probe_ongoing,
+	       ndd->s_round_slots_till_now, ndd->s_min_rtprop_us,
+	       ndd->s_round_min_rtt_us, ndd->s_round_max_rate_pps,
+	       ndd->s_slot_max_qdel_us);
+#endif
 }
 
-static void update_cwnd(struct sock* sk, struct ndd_data *ndd, struct tcp_sock *tsk, u32 rtt_us)
+static void update_cwnd(struct sock *sk, struct ndd_data *ndd,
+			struct tcp_sock *tsk, u32 rtt_us)
 {
 	u64 bw_estimate_pps;
 	u64 flow_count_belief_unit;
@@ -459,6 +473,7 @@ static void on_ack(struct sock *sk, const struct rate_sample *rs)
 
 	if (cruise_ended(ndd, now_us) || probe_ended(ndd, tsk)) {
 		ndd->s_round_slots_till_now++;
+		log_slot_end(sk, ndd, tsk, rtt_us, now_us);
 
 		// probe ended
 		if (ndd->s_probe_ongoing) {
