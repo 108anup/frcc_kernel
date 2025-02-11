@@ -42,8 +42,10 @@ struct ndd_data {
 
 	u32 s_slot_max_qdel_us;
 	u64 s_slot_start_time_us;
+	u32 s_slot_max_rate_pps; // for logging only
 
 	bool s_probe_ongoing;
+	u32 s_probe_min_rtt_us; // for logging only
 	u32 s_probe_min_excess_delay_us;
 	u32 s_probe_prev_cwnd_pkts;
 	u32 s_probe_excess_pkts;
@@ -58,9 +60,31 @@ struct ndd_data {
 static void ndd_init(struct sock *sk)
 {
 	struct ndd_data *ndd = inet_csk_ca(sk);
-	// ndd->min_rtt_us = U32_MAX;
 	++id;
 	ndd->id = id;
+
+	ndd->s_min_rtprop_us = p_ub_rtprop_us;
+
+	ndd->s_round_slots_till_now = 0;
+	ndd->s_round_min_rtt_us = U32_MAX;
+	ndd->s_round_max_rate_pps = 0;
+
+	ndd->s_slot_max_qdel_us = 0;
+	ndd->s_slot_start_time_us = 0;
+	ndd->s_slot_max_rate_pps = 0;
+
+	ndd->s_probe_ongoing = false;
+	ndd->s_probe_min_excess_delay_us = U32_MAX;
+	ndd->s_probe_min_rtt_us = U32_MAX;
+	ndd->s_probe_prev_cwnd_pkts = 0;
+	ndd->s_probe_excess_pkts = 0;
+
+	ndd->s_probe_start_seq = 0;
+	ndd->s_probe_inflightmatch_seq = 0;
+	ndd->s_probe_first_seq = 0;
+	ndd->s_probe_last_seq = 0;
+	ndd->s_probe_first_seq_snd_time = 0;
+
 	cmpxchg(&sk->sk_pacing_status, SK_PACING_NONE, SK_PACING_NEEDED);
 }
 
@@ -126,6 +150,7 @@ static void update_estimates(struct ndd_data *ndd, struct tcp_sock *tsk,
 
 	ndd->s_min_rtprop_us = min_t(u32, ndd->s_min_rtprop_us, init_rtt_us);
 	ndd->s_min_rtprop_us = min_t(u32, ndd->s_min_rtprop_us, rtt_us);
+
 	ndd->s_round_min_rtt_us = min_t(u32, ndd->s_round_min_rtt_us, rtt_us);
 
 	if (ndd->s_probe_ongoing && part_of_probe(ndd, tsk)) {
@@ -133,11 +158,15 @@ static void update_estimates(struct ndd_data *ndd, struct tcp_sock *tsk,
 		ndd->s_probe_min_excess_delay_us =
 			min_t(u32, ndd->s_probe_min_excess_delay_us,
 			      this_excess_delay_us);
-	} else {
+		ndd->s_probe_min_rtt_us =
+			min_t(u32, ndd->s_probe_min_rtt_us, rtt_us);
+	} else if (!ndd->s_probe_ongoing) {
 		ndd->s_slot_max_qdel_us =
 			max_t(u32, ndd->s_slot_max_qdel_us, this_qdel);
 		ndd->s_round_max_rate_pps =
 			max_t(u64, ndd->s_round_max_rate_pps, this_rate_pps);
+		ndd->s_slot_max_rate_pps =
+			max_t(u64, ndd->s_slot_max_rate_pps, this_rate_pps);
 	}
 }
 
@@ -188,6 +217,7 @@ static void reset_probe_state(struct ndd_data *ndd)
 {
 	ndd->s_probe_ongoing = false;
 	ndd->s_probe_min_excess_delay_us = U32_MAX;
+	ndd->s_probe_min_rtt_us = U32_MAX;
 	ndd->s_probe_prev_cwnd_pkts = 0; // should not be read anyway.
 
 	ndd->s_probe_start_seq = 0;
@@ -216,6 +246,7 @@ static void start_probe(struct ndd_data *ndd, struct tcp_sock *tsk)
 
 	ndd->s_probe_ongoing = true;
 	ndd->s_probe_min_excess_delay_us = U32_MAX;
+	ndd->s_probe_min_rtt_us = U32_MAX;
 
 	target_flow_count_unit = get_target_flow_count_unit(ndd);
 	excess_pkts = p_probe_multiplier_unit;
@@ -241,6 +272,7 @@ static void start_new_slot(struct ndd_data *ndd, u64 now_us)
 {
 	ndd->s_slot_max_qdel_us = 0;
 	ndd->s_slot_start_time_us = now_us;
+	ndd->s_slot_max_rate_pps = 0;
 }
 
 static void update_probe_state(struct ndd_data *ndd, struct tcp_sock *tsk,
@@ -272,6 +304,39 @@ static void update_probe_state(struct ndd_data *ndd, struct tcp_sock *tsk,
 			ndd->s_probe_last_seq = last_snd_seq;
 		}
 	}
+}
+
+static void log_cwnd_update(struct sock *sk, struct ndd_data *ndd,
+			    struct tcp_sock *tsk, u32 rtt_us,
+			    u64 bw_estimate_pps, u64 flow_count_belief_unit,
+			    u64 target_flow_count_unit, u64 target_cwnd_unit,
+			    u64 next_cwnd_unit)
+{
+#ifdef NDD_DEBUG
+	printk(KERN_INFO
+	       "ndd cwnd_update_1 flow %u cwnd %u pacing %lu rtt %u mss %u",
+	       ndd->id, tsk->snd_cwnd, sk->sk_pacing_rate, rtt_us,
+	       tsk->mss_cache);
+	printk(KERN_INFO
+	       "ndd cwnd_update_2 flow %u unit %u"
+	       "min_rtt_before %u min_rtt_after %u "
+	       "prev_cwnd %u excess_pkts %u "
+	       "excess_delay %u bw_estimate %llu "
+	       "round_max_rate %u slot_max_rate %u "
+	       "flow_count_target_unit %llu flow_count_belief_unit %llu "
+	       "target_cwnd_unit %llu next_cwnd_unit %llu ",
+	       ndd->id, P_UNIT, ndd->s_round_min_rtt_us,
+	       ndd->s_probe_min_rtt_us, ndd->s_probe_prev_cwnd_pkts,
+	       ndd->s_probe_excess_pkts, ndd->s_probe_min_excess_delay_us,
+	       bw_estimate_pps, ndd->s_round_max_rate_pps,
+	       ndd->s_slot_max_rate_pps, target_flow_count_unit,
+	       flow_count_belief_unit, target_cwnd_unit, next_cwnd_unit);
+#endif
+}
+
+static void log_slot_end(struct ndd_data *ndd, struct tcp_sock *tsk, u32 rtt_us)
+{
+
 }
 
 static void update_cwnd(struct sock* sk, struct ndd_data *ndd, struct tcp_sock *tsk, u32 rtt_us)
@@ -322,6 +387,10 @@ static void update_cwnd(struct sock* sk, struct ndd_data *ndd, struct tcp_sock *
 	next_rate_bps = 2 * tsk->snd_cwnd * ndd_get_mss(tsk) * USEC_PER_SEC;
 	do_div(next_rate_bps, rtt_us);
 	sk->sk_pacing_rate = next_rate_bps;
+
+	log_cwnd_update(sk, ndd, tsk, rtt_us, bw_estimate_pps,
+			flow_count_belief_unit, target_flow_count_unit,
+			target_cwnd_unit, next_cwnd_unit);
 }
 
 static void on_ack(struct sock *sk, const struct rate_sample *rs)
@@ -353,8 +422,8 @@ static void on_ack(struct sock *sk, const struct rate_sample *rs)
 
 		// probe ended
 		if (ndd->s_probe_ongoing) {
-			reset_probe_state(ndd);
 			update_cwnd(sk, ndd, tsk, rtt_us);
+			reset_probe_state(ndd);
 		}
 
 		if (round_ended(ndd, tsk)) {
@@ -418,46 +487,3 @@ MODULE_AUTHOR("Anup Agarwal <108anup@gmail.com>");
 MODULE_LICENSE("Dual BSD/GPL");
 MODULE_DESCRIPTION("TCP NDD (Provably fair and robust CC)");
 MODULE_VERSION("0.1");
-
-/*
---------------------------------------------------------------------------------
-Old code snippets for reference:
---------------------------------------------------------------------------------
-	// Update intervals
-	BUILD_BUG_ON(ndd_history_periods * 2 != ndd_num_intervals);
-	if (tcp_stamp_us_delta(timestamp, ndd->last_update_tstamp) >= ndd->min_rtt_us) {
-	ndd->intervals[ndd->intervals_head].pkts_acked = rs->acked_sacked;
-	ndd->intervals[ndd->intervals_head].pkts_lost = rs->losses;
-	ndd->intervals[ndd->intervals_head].app_limited = rs->is_app_limited;
-	ndd->intervals[ndd->intervals_head].min_rtt_us = rs->rtt_us;
-	ndd->intervals[ndd->intervals_head].max_rtt_us = rs->rtt_us;
-	ndd->intervals[ndd->intervals_head].ic_bytes_sent = tsk->bytes_sent;
-	ndd->intervals[ndd->intervals_head].ic_rs_prior_mstamp = rs->prior_mstamp;
-	ndd->intervals[ndd->intervals_head].ic_rs_prior_delivered = rs->prior_delivered;
-	ndd->intervals[ndd->intervals_head].ic_delivered = tsk->delivered;
-	ndd->intervals[ndd->intervals_head].processed = false;
-	ndd->intervals[ndd->intervals_head].invalid = false;
-	ndd->intervals[ndd->intervals_head].ic_sending_rate = sk->sk_pacing_rate / ndd_get_mss(tsk);
-
-	lower bound clamps
-	tsk->snd_cwnd = max_t(u32, tsk->snd_cwnd, ndd_alpha_segments);
-	sk->sk_pacing_rate = max_t(u64, sk->sk_pacing_rate, ndd_alpha_rate);
-
-#ifdef NDD_DEBUG
-	printk(KERN_INFO
-			"ndd flow %u cwnd %u pacing %lu rtt %u mss %u timestamp %llu "
-			"interval %ld state %d",
-			ndd->id, tsk->snd_cwnd, sk->sk_pacing_rate, rtt_us,
-			tsk->mss_cache, timestamp, rs->interval_us, ndd->state);
-	printk(KERN_INFO
-			"ndd pkts_acked %u hist_us %u pacing %lu loss_happened %d "
-			"app_limited %d rs_limited %d latest_inflight_segments %u "
-			"delivered_bytes %llu",
-			pkts_acked, hist_us, sk->sk_pacing_rate,
-			(int)ndd->loss_happened, (int)app_limited,
-			(int)rs->is_app_limited, latest_inflight_segments,
-			((u64) ndd_get_mss(tsk)) * tsk->delivered);
-#endif
-	printk(KERN_INFO "ndd_cong_ctrl got rtt_us %lu", rs->rtt_us);
-	printk(KERN_INFO "ndd_cong_ctrl cwnd %u pacing %lu", tsk->snd_cwnd, sk->sk_pacing_rate);
- */
