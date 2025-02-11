@@ -312,6 +312,14 @@ static void start_new_slot(struct ndd_data *ndd, u64 now_us)
 static void update_probe_state(struct ndd_data *ndd, struct tcp_sock *tsk,
 			       const struct rate_sample *rs, u64 now_us)
 {
+	// TODO: use inflight = cwnd style checks for start and end of probe.
+	// The RTT style checks are upper bounds.
+
+	// TODO: The round durations will likely we off by one slot (because
+	// probing slot duration may not be the same for all flows in this
+	// tight interpretation) for flows with different propagation delays.
+	// How might that affect things? We can just pad time if probe has
+	// ended but slot has not.
 	u64 last_rcv_seq;
 	u64 last_snd_seq;
 	u64 end_seq_snd_time;
@@ -370,6 +378,7 @@ static void log_cwnd_update(struct sock *sk, struct ndd_data *ndd,
 
 static void log_slot_end(struct ndd_data *ndd, struct tcp_sock *tsk, u32 rtt_us)
 {
+	// TODO: Implement this
 }
 
 static void update_cwnd(struct sock* sk, struct ndd_data *ndd, struct tcp_sock *tsk, u32 rtt_us)
