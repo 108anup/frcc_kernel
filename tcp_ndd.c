@@ -132,15 +132,15 @@ static u64 get_last_rcv_seq(struct tcp_sock *tsk)
 static bool part_of_probe(struct ndd_data *ndd, struct tcp_sock *tsk)
 {
 	u64 last_rcv_seq = get_last_rcv_seq(tsk);
-	if (ndd->s_probe->s_probe_start_seq > 0) {
+	if (ndd->s_probe->s_probe_first_seq > 0) {
 		if (ndd->s_probe->s_probe_last_seq > 0) {
 			return !before(last_rcv_seq,
-				       ndd->s_probe->s_probe_start_seq) &&
+				       ndd->s_probe->s_probe_first_seq) &&
 			       !after(last_rcv_seq,
 				      ndd->s_probe->s_probe_last_seq);
 		} else {
 			return !before(last_rcv_seq,
-				       ndd->s_probe->s_probe_start_seq);
+				       ndd->s_probe->s_probe_first_seq);
 		}
 	}
 	return false;
@@ -344,7 +344,7 @@ static void start_new_slot(struct ndd_data *ndd, u64 now_us)
 }
 
 static void update_probe_state(struct ndd_data *ndd, struct tcp_sock *tsk,
-			       const struct rate_sample *rs, u64 now_us)
+			       const struct rate_sample *rs, u32 rtt_us, u64 now_us)
 {
 	// TODO: use inflight = cwnd style checks for start and end of probe.
 	// The RTT style checks are upper bounds.
@@ -364,10 +364,15 @@ static void update_probe_state(struct ndd_data *ndd, struct tcp_sock *tsk,
 
 #ifdef NDD_DEBUG_VERBOSE
 	printk(KERN_INFO
-	       "ndd probe_state flow %u probe_ongoing %u "
-	       "probe_start_seq %llu last_snd_seq %llu last_rcv_seq %llu ",
-	       ndd->id, ndd->s_probe_ongoing, ndd->s_probe->s_probe_start_seq,
-	       last_snd_seq, last_rcv_seq);
+	       "ndd probe_state flow %u now %llu probe_ongoing %u "
+	       "last_snd_seq %llu last_rcv_seq %llu rtt %u "
+	       "probe_start_seq %llu probe_inflightmatch_seq %llu "
+	       "probe_first_seq %llu probe_last_seq %llu part_of_probe %u ",
+	       ndd->id, now_us, ndd->s_probe_ongoing, last_snd_seq,
+	       last_rcv_seq, rtt_us, ndd->s_probe->s_probe_start_seq,
+	       ndd->s_probe->s_probe_inflightmatch_seq,
+	       ndd->s_probe->s_probe_first_seq, ndd->s_probe->s_probe_last_seq,
+	       part_of_probe(ndd, tsk));
 #endif
 
 	if (ndd->s_probe->s_probe_inflightmatch_seq == 0) {
@@ -422,14 +427,14 @@ static void log_cwnd_update(struct sock *sk, struct ndd_data *ndd,
 #ifdef NDD_INFO
 	printk(KERN_INFO
 	       "ndd cwnd_update flow %u now %llu cwnd %u pacing %lu rtt %u mss %u "
-	       "min_rtt_before %u min_rtt_after %u "
+	       "unit %u min_rtt_before %u min_rtt_after %u "
 	       "prev_cwnd %u excess_pkts %u "
 	       "excess_delay %u bw_estimate %llu "
 	       "round_max_rate %u slot_max_rate %u "
 	       "flow_count_target_unit %llu flow_count_belief_unit %llu "
 	       "target_cwnd_unit %llu next_cwnd_unit %llu",
 	       ndd->id, now_us, tsk->snd_cwnd, sk->sk_pacing_rate, rtt_us,
-	       tsk->mss_cache, ndd->s_round_min_rtt_us, ndd->s_probe_min_rtt_us,
+	       tsk->mss_cache, P_UNIT, ndd->s_round_min_rtt_us, ndd->s_probe_min_rtt_us,
 	       ndd->s_probe_prev_cwnd_pkts, ndd->s_probe_excess_pkts,
 	       ndd->s_probe_min_excess_delay_us, bw_estimate_pps,
 	       ndd->s_round_max_rate_pps, ndd->s_slot_max_rate_pps,
@@ -551,7 +556,7 @@ static void on_ack(struct sock *sk, const struct rate_sample *rs)
 	update_estimates(ndd, tsk, rs, rtt_us);
 
 	if (ndd->s_probe_ongoing) {
-		update_probe_state(ndd, tsk, rs, now_us);
+		update_probe_state(ndd, tsk, rs, rtt_us, now_us);
 	}
 
 	if (ndd->s_probe_ongoing && should_init_probe_end(ndd, tsk)) {
