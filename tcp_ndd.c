@@ -22,6 +22,7 @@ static const u32 p_probe_duration_us =
 	p_ub_rtterr_us; // ? Do we want something else here?
 static const u32 p_probe_multiplier_unit = P_UNIT * 4;
 static const u32 p_cwnd_averaging_factor_unit = P_UNIT * 1 / 2;
+static const u32 p_inv_cwnd_averaging_factor_unit = 1 - ((s32)p_cwnd_averaging_factor_unit);
 static const u32 p_cwnd_clamp_hi_unit = P_UNIT * 6 / 5;
 static const u32 p_cwnd_clamp_lo_unit = P_UNIT * 11 / 10;
 static const u32 p_slot_load_factor_unit = P_UNIT * 2;
@@ -29,6 +30,7 @@ static const u32 p_slots_per_round =
 	(((u64)p_slot_load_factor_unit) * p_ub_flow_count) >> P_SCALE;
 
 static u32 id = 0;
+
 struct ndd_data {
 	u32 id;
 
@@ -54,10 +56,10 @@ struct ndd_data {
 	u32 s_probe_excess_pkts;
 	bool s_probe_end_initiated;
 
-	u32 s_probe_start_seq;
-	u32 s_probe_inflightmatch_seq;
-	u32 s_probe_first_seq;
-	u32 s_probe_last_seq;
+	u64 s_probe_start_seq;
+	u64 s_probe_inflightmatch_seq;
+	u64 s_probe_first_seq;
+	u64 s_probe_last_seq;
 	u64 s_probe_first_seq_snd_time;
 };
 
@@ -294,7 +296,7 @@ static void log_probe_start(struct sock *sk, struct ndd_data *ndd,
 	       tsk->mss_cache);
 	printk(KERN_INFO
 	       "ndd probe_start_2 flow %u min_rtt %u min_excess_delay %u "
-	       "prev_cwnd %u excess_pkts %u probe_start_seq %u",
+	       "prev_cwnd %u excess_pkts %u probe_start_seq %llu",
 	       ndd->id, ndd->s_probe_min_rtt_us,
 	       ndd->s_probe_min_excess_delay_us, ndd->s_probe_prev_cwnd_pkts,
 	       ndd->s_probe_excess_pkts, ndd->s_probe_start_seq);
@@ -355,17 +357,37 @@ static void update_probe_state(struct ndd_data *ndd, struct tcp_sock *tsk,
 		if (after(last_rcv_seq, ndd->s_probe_start_seq)) {
 			ndd->s_probe_inflightmatch_seq = last_snd_seq;
 		}
+#ifdef NDD_DEBUG
+		printk(KERN_INFO
+		       "ndd probe_inflightmatch flow %u "
+		       "probe_inflightmatch_seq %llu last_snd_seq %llu last_rcv_seq %llu ",
+		       ndd->id, ndd->s_probe_inflightmatch_seq, last_snd_seq, last_rcv_seq);
+#endif
 	}
 	else if (ndd->s_probe_first_seq == 0) {
 		if (after(last_rcv_seq, ndd->s_probe_inflightmatch_seq)) {
 			ndd->s_probe_first_seq = last_snd_seq;
 			ndd->s_probe_first_seq_snd_time = now_us;
 		}
+#ifdef NDD_DEBUG
+		printk(KERN_INFO
+		       "ndd probe_first_seq flow %u probe_first_seq %llu "
+		       "last_snd_seq %llu last_rcv_seq %llu now %llu ",
+		       ndd->id, ndd->s_probe_first_seq, last_snd_seq,
+		       last_rcv_seq, now_us);
+#endif
 	} else if (ndd->s_probe_last_seq == 0) {
 		end_seq_snd_time = ndd->s_probe_first_seq_snd_time + p_probe_duration_us;
 		if (time_after64(now_us, end_seq_snd_time)) {
 			ndd->s_probe_last_seq = last_snd_seq;
 		}
+#ifdef NDD_DEBUG
+		printk(KERN_INFO
+		       "ndd probe_last_seq flow %u probe_last_seq %llu "
+		       "last_snd_seq %llu last_rcv_seq %llu now %llu ",
+		       ndd->id, ndd->s_probe_last_seq, last_snd_seq,
+		       last_rcv_seq, now_us);
+#endif
 	}
 }
 
@@ -381,7 +403,7 @@ static void log_cwnd_update(struct sock *sk, struct ndd_data *ndd,
 	       ndd->id, tsk->snd_cwnd, sk->sk_pacing_rate, rtt_us,
 	       tsk->mss_cache);
 	printk(KERN_INFO
-	       "ndd cwnd_update_2 flow %u unit %u"
+	       "ndd cwnd_update_2 flow %u unit %u "
 	       "min_rtt_before %u min_rtt_after %u "
 	       "prev_cwnd %u excess_pkts %u "
 	       "excess_delay %u bw_estimate %llu "
@@ -470,7 +492,7 @@ static void update_cwnd(struct sock *sk, struct ndd_data *ndd,
 	}
 
 	next_cwnd_unit =
-		(1 - p_cwnd_averaging_factor_unit) * tsk->snd_cwnd +
+		(p_inv_cwnd_averaging_factor_unit) * tsk->snd_cwnd +
 		((p_cwnd_averaging_factor_unit * target_cwnd_unit) >> P_SCALE);
 	next_cwnd = DIV_ROUND_UP_ULL(next_cwnd_unit, P_UNIT);
 	next_cwnd = max_t(u32, next_cwnd, p_lb_cwnd_pkts);
@@ -509,7 +531,8 @@ static void on_ack(struct sock *sk, const struct rate_sample *rs)
 		update_pacing_rate(sk, tsk, rtt_us);
 	}
 
-	if (cruise_ended(ndd, now_us) || probe_ended(ndd, tsk)) {
+	if ((!ndd->s_probe_ongoing && cruise_ended(ndd, now_us)) ||
+	    (ndd->s_probe_ongoing && probe_ended(ndd, tsk))) {
 		ndd->s_round_slots_till_now++;
 		log_slot_end(sk, ndd, tsk, rtt_us, now_us);
 
