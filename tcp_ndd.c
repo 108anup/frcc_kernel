@@ -14,7 +14,7 @@ NDD: A provably fair and robust congestion controller
 // Assumptions about network scenarios
 static const u32 p_ub_rtprop_us = 100000; // 100 ms
 static const u32 p_ub_rtterr_us = 10000; // 10 ms
-static const u32 p_ub_flow_count = 10;
+static const u32 p_ub_flow_count = 5;
 
 // Design parameters
 // TODO: check if these floating values make sense given the UNIT. Should we
@@ -26,11 +26,11 @@ static const u32 p_probe_duration_us =
 static const u32 p_probe_multiplier_unit = P_UNIT * 4;
 static const u32 p_cwnd_averaging_factor_unit = P_UNIT * 1 / 2;
 static const u32 p_inv_cwnd_averaging_factor_unit = P_UNIT * 1 - p_cwnd_averaging_factor_unit;
-static const u32 p_cwnd_clamp_hi_unit = P_UNIT * 6 / 5;
-static const u32 p_cwnd_clamp_lo_unit = P_UNIT * 11 / 10;
+static const u32 p_cwnd_clamp_hi_unit = P_UNIT * 12 / 10;
+static const u32 p_cwnd_clamp_lo_unit = P_UNIT * 10 / 11;
 static const u32 p_slot_load_factor_unit = P_UNIT * 2;
 static const u32 p_slots_per_round =
-	(((u64)p_slot_load_factor_unit) * p_ub_flow_count) >> P_SCALE;
+	(p_slot_load_factor_unit * p_ub_flow_count) >> P_SCALE;
 
 static u32 id = 0;
 
