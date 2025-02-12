@@ -16,6 +16,7 @@ static const u32 p_ub_flow_count = 10;
 // Design parameters
 // TODO: check if these floating values make sense given the UNIT. Should we
 // change the unit?
+static const u32 p_lb_cwnd_pkts = 2;
 static const u32 p_contract_min_qdel_us = p_ub_rtprop_us / 2;
 static const u32 p_probe_duration_us =
 	p_ub_rtterr_us; // ? Do we want something else here?
@@ -25,7 +26,7 @@ static const u32 p_cwnd_clamp_hi_unit = P_UNIT * 6 / 5;
 static const u32 p_cwnd_clamp_lo_unit = P_UNIT * 11 / 10;
 static const u32 p_slot_load_factor_unit = P_UNIT * 2;
 static const u32 p_slots_per_round =
-	(((u64)p_slot_load_factor_unit) * p_ub_flow_count) << P_SCALE;
+	(((u64)p_slot_load_factor_unit) * p_ub_flow_count) >> P_SCALE;
 
 static u32 id = 0;
 struct ndd_data {
@@ -157,7 +158,7 @@ static void update_pacing_rate(struct sock *sk, struct tcp_sock *tsk, u32 rtt_us
 static void update_estimates(struct ndd_data *ndd, struct tcp_sock *tsk,
 			     const struct rate_sample *rs, u32 rtt_us)
 {
-	u32 this_qdel = rtt_us - ndd->s_min_rtprop_us;
+	u32 this_qdel;
 	u32 init_rtt_us = get_initial_rtt(tsk);
 	// TODO: Should we use the rs->delivered instead of snd_cwnd?
 	u64 this_rate_pps = tsk->snd_cwnd * USEC_PER_SEC;
@@ -167,6 +168,7 @@ static void update_estimates(struct ndd_data *ndd, struct tcp_sock *tsk,
 	ndd->s_min_rtprop_us = min_t(u32, ndd->s_min_rtprop_us, rtt_us);
 
 	ndd->s_round_min_rtt_us = min_t(u32, ndd->s_round_min_rtt_us, rtt_us);
+	this_qdel = rtt_us - ndd->s_min_rtprop_us;
 
 	if (ndd->s_probe_ongoing && part_of_probe(ndd, tsk)) {
 		u32 this_excess_delay_us = rtt_us - ndd->s_round_min_rtt_us;
@@ -282,6 +284,23 @@ static u32 get_probe_excess(struct ndd_data *ndd)
 	return excess_pkts;
 }
 
+static void log_probe_start(struct sock *sk, struct ndd_data *ndd,
+			    struct tcp_sock *tsk, u32 rtt_us)
+{
+#ifdef NDD_DEBUG
+	printk(KERN_INFO
+	       "ndd probe_start_1 flow %u cwnd %u pacing %lu rtt %u mss %u ",
+	       ndd->id, tsk->snd_cwnd, sk->sk_pacing_rate, rtt_us,
+	       tsk->mss_cache);
+	printk(KERN_INFO
+	       "ndd probe_start_2 flow %u min_rtt %u min_excess_delay %u "
+	       "prev_cwnd %u excess_pkts %u probe_start_seq %u",
+	       ndd->id, ndd->s_probe_min_rtt_us,
+	       ndd->s_probe_min_excess_delay_us, ndd->s_probe_prev_cwnd_pkts,
+	       ndd->s_probe_excess_pkts, ndd->s_probe_start_seq);
+#endif
+}
+
 static void start_probe(struct sock *sk, struct ndd_data *ndd,
 			struct tcp_sock *tsk, u32 rtt_us)
 {
@@ -300,6 +319,8 @@ static void start_probe(struct sock *sk, struct ndd_data *ndd,
 
 	tsk->snd_cwnd += ndd->s_probe_excess_pkts;
 	update_pacing_rate(sk, tsk, rtt_us);
+
+	log_probe_start(sk, ndd, tsk, rtt_us);
 }
 
 static void start_new_slot(struct ndd_data *ndd, u64 now_us)
@@ -404,14 +425,24 @@ static void update_cwnd(struct sock *sk, struct ndd_data *ndd,
 	u64 fc_belief_lo_clamp;
 	u64 target_cwnd_unit;
 	u64 next_cwnd_unit;
+	u32 next_cwnd;
 
-	bw_estimate_pps = ndd->s_probe_excess_pkts;
-	bw_estimate_pps *= USEC_PER_SEC;
-	do_div(bw_estimate_pps, ndd->s_probe_min_excess_delay_us);
+	bw_estimate_pps = U64_MAX;
+	if (ndd->s_probe_min_excess_delay_us > 0) {
+		bw_estimate_pps = ndd->s_probe_excess_pkts;
+		bw_estimate_pps *= USEC_PER_SEC;
+		do_div(bw_estimate_pps, ndd->s_probe_min_excess_delay_us);
+	}
 
-	flow_count_belief_unit = P_UNIT;
-	flow_count_belief_unit *= bw_estimate_pps;
-	do_div(flow_count_belief_unit, ndd->s_round_max_rate_pps);
+	flow_count_belief_unit = p_ub_flow_count << P_SCALE;
+	if (ndd->s_round_max_rate_pps > 0) {
+		flow_count_belief_unit = P_UNIT;
+		flow_count_belief_unit *= bw_estimate_pps;
+		do_div(flow_count_belief_unit, ndd->s_round_max_rate_pps);
+	}
+	// TODO: is this needed? we clamp flow_count_belief anyway.
+	// flow_count_belief_unit = min_t(u64, flow_count_belief_unit,
+	// p_ub_flow_count << P_SCALE);
 
 	target_flow_count_unit = get_target_flow_count_unit(ndd);
 	fc_belief_hi_clamp =
@@ -429,14 +460,21 @@ static void update_cwnd(struct sock *sk, struct ndd_data *ndd,
 			max_t(u64, flow_count_belief_unit, fc_belief_lo_clamp);
 	}
 
-	target_cwnd_unit = tsk->snd_cwnd << P_SCALE;
-	target_cwnd_unit *= flow_count_belief_unit;
-	do_div(target_cwnd_unit, target_flow_count_unit);
+	if (target_flow_count_unit < P_UNIT) {
+		target_cwnd_unit = tsk->snd_cwnd * p_cwnd_clamp_hi_unit;
+	}
+	else {
+		target_cwnd_unit = tsk->snd_cwnd << P_SCALE;
+		target_cwnd_unit *= flow_count_belief_unit;
+		do_div(target_cwnd_unit, target_flow_count_unit);
+	}
 
 	next_cwnd_unit =
 		(1 - p_cwnd_averaging_factor_unit) * tsk->snd_cwnd +
 		((p_cwnd_averaging_factor_unit * target_cwnd_unit) >> P_SCALE);
-	tsk->snd_cwnd = DIV_ROUND_UP_ULL(next_cwnd_unit, P_UNIT);
+	next_cwnd = DIV_ROUND_UP_ULL(next_cwnd_unit, P_UNIT);
+	next_cwnd = max_t(u32, next_cwnd, p_lb_cwnd_pkts);
+	tsk->snd_cwnd = next_cwnd;
 
 	update_pacing_rate(sk, tsk, rtt_us);
 
@@ -455,7 +493,7 @@ static void on_ack(struct sock *sk, const struct rate_sample *rs)
 
 	// Is struct valid? Is rate sample valid? Is RTT valid?
 	if (!ndd_valid(ndd) || rs->delivered < 0 || rs->interval_us < 0 ||
-	    rs->rtt_us < 0)
+	    rs->rtt_us <= 0)
 		return;
 
 	rtt_us = rs->rtt_us;
