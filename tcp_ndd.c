@@ -300,24 +300,22 @@ static u32 get_probe_excess(struct ndd_data *ndd)
 }
 
 static void log_probe_start(struct sock *sk, struct ndd_data *ndd,
-			    struct tcp_sock *tsk, u32 rtt_us)
+			    struct tcp_sock *tsk, u32 rtt_us, u64 now_us)
 {
 #ifdef NDD_INFO
 	printk(KERN_INFO
-	       "ndd probe_start_1 flow %u cwnd %u pacing %lu rtt %u mss %u ",
-	       ndd->id, tsk->snd_cwnd, sk->sk_pacing_rate, rtt_us,
-	       tsk->mss_cache);
-	printk(KERN_INFO
-	       "ndd probe_start_2 flow %u min_rtt %u min_excess_delay %u "
+	       "ndd probe_start flow %u now %llu cwnd %u pacing %lu rtt %u mss %u "
+	       "min_rtt %u min_excess_delay %u "
 	       "prev_cwnd %u excess_pkts %u probe_start_seq %llu",
-	       ndd->id, ndd->s_probe_min_rtt_us,
+	       ndd->id, now_us, tsk->snd_cwnd, sk->sk_pacing_rate, rtt_us,
+	       tsk->mss_cache, ndd->s_probe_min_rtt_us,
 	       ndd->s_probe_min_excess_delay_us, ndd->s_probe_prev_cwnd_pkts,
 	       ndd->s_probe_excess_pkts, ndd->s_probe->s_probe_start_seq);
 #endif
 }
 
 static void start_probe(struct sock *sk, struct ndd_data *ndd,
-			struct tcp_sock *tsk, u32 rtt_us)
+			struct tcp_sock *tsk, u32 rtt_us, u64 now_us)
 {
 	ndd->s_probe_ongoing = true;
 	ndd->s_probe_min_rtt_us = U32_MAX;
@@ -335,7 +333,7 @@ static void start_probe(struct sock *sk, struct ndd_data *ndd,
 	tsk->snd_cwnd += ndd->s_probe_excess_pkts;
 	update_pacing_rate(sk, tsk, rtt_us);
 
-	log_probe_start(sk, ndd, tsk, rtt_us);
+	log_probe_start(sk, ndd, tsk, rtt_us, now_us);
 }
 
 static void start_new_slot(struct ndd_data *ndd, u64 now_us)
@@ -418,27 +416,25 @@ static void log_cwnd_update(struct sock *sk, struct ndd_data *ndd,
 			    struct tcp_sock *tsk, u32 rtt_us,
 			    u64 bw_estimate_pps, u64 flow_count_belief_unit,
 			    u64 target_flow_count_unit, u64 target_cwnd_unit,
-			    u64 next_cwnd_unit)
+			    u64 next_cwnd_unit, u64 now_us)
 {
+	// TODO: slot max rate is zero here always.
 #ifdef NDD_INFO
 	printk(KERN_INFO
-	       "ndd cwnd_update_1 flow %u cwnd %u pacing %lu rtt %u mss %u ",
-	       ndd->id, tsk->snd_cwnd, sk->sk_pacing_rate, rtt_us,
-	       tsk->mss_cache);
-	printk(KERN_INFO
-	       "ndd cwnd_update_2 flow %u unit %u "
+	       "ndd cwnd_update flow %u now %llu cwnd %u pacing %lu rtt %u mss %u "
 	       "min_rtt_before %u min_rtt_after %u "
 	       "prev_cwnd %u excess_pkts %u "
 	       "excess_delay %u bw_estimate %llu "
 	       "round_max_rate %u slot_max_rate %u "
 	       "flow_count_target_unit %llu flow_count_belief_unit %llu "
-	       "target_cwnd_unit %llu next_cwnd_unit %llu ",
-	       ndd->id, P_UNIT, ndd->s_round_min_rtt_us,
-	       ndd->s_probe_min_rtt_us, ndd->s_probe_prev_cwnd_pkts,
-	       ndd->s_probe_excess_pkts, ndd->s_probe_min_excess_delay_us,
-	       bw_estimate_pps, ndd->s_round_max_rate_pps,
-	       ndd->s_slot_max_rate_pps, target_flow_count_unit,
-	       flow_count_belief_unit, target_cwnd_unit, next_cwnd_unit);
+	       "target_cwnd_unit %llu next_cwnd_unit %llu",
+	       ndd->id, now_us, tsk->snd_cwnd, sk->sk_pacing_rate, rtt_us,
+	       tsk->mss_cache, ndd->s_round_min_rtt_us, ndd->s_probe_min_rtt_us,
+	       ndd->s_probe_prev_cwnd_pkts, ndd->s_probe_excess_pkts,
+	       ndd->s_probe_min_excess_delay_us, bw_estimate_pps,
+	       ndd->s_round_max_rate_pps, ndd->s_slot_max_rate_pps,
+	       target_flow_count_unit, flow_count_belief_unit, target_cwnd_unit,
+	       next_cwnd_unit);
 #endif
 }
 
@@ -449,23 +445,22 @@ static void log_slot_end(struct sock *sk, struct ndd_data *ndd,
 	u32 slot_duration_us =
 		tcp_stamp_us_delta(now_us, ndd->s_slot_start_time_us);
 	printk(KERN_INFO
-	       "ndd slot_end_1 flow %u cwnd %u pacing %lu rtt %u mss %u ",
-	       ndd->id, tsk->snd_cwnd, sk->sk_pacing_rate, rtt_us,
-	       tsk->mss_cache);
-	printk(KERN_INFO "ndd slot_end_2 flow %u slot_start %llu slot_end %llu "
-			 "slot_duration %u probing %u slots_till_now %u "
-			 "rtprop %u round_min_rtt %u round_max_rate %u "
-			 "slot_max_qdel %u slot_max_rate %u ",
-	       ndd->id, ndd->s_slot_start_time_us, now_us, slot_duration_us,
-	       ndd->s_probe_ongoing, ndd->s_round_slots_till_now,
-	       ndd->s_min_rtprop_us, ndd->s_round_min_rtt_us,
-	       ndd->s_round_max_rate_pps, ndd->s_slot_max_qdel_us,
-	       ndd->s_slot_max_rate_pps);
+	       "ndd slot_end flow %u now %llu cwnd %u pacing %lu rtt %u mss %u "
+	       "slot_start %llu slot_end %llu "
+	       "slot_duration %u probing %u slots_till_now %u "
+	       "rtprop %u round_min_rtt %u round_max_rate %u "
+	       "slot_max_qdel %u slot_max_rate %u",
+	       ndd->id, now_us, tsk->snd_cwnd, sk->sk_pacing_rate, rtt_us,
+	       tsk->mss_cache, ndd->s_slot_start_time_us, now_us,
+	       slot_duration_us, ndd->s_probe_ongoing,
+	       ndd->s_round_slots_till_now, ndd->s_min_rtprop_us,
+	       ndd->s_round_min_rtt_us, ndd->s_round_max_rate_pps,
+	       ndd->s_slot_max_qdel_us, ndd->s_slot_max_rate_pps);
 #endif
 }
 
 static void update_cwnd(struct sock *sk, struct ndd_data *ndd,
-			struct tcp_sock *tsk, u32 rtt_us)
+			struct tcp_sock *tsk, u32 rtt_us, u64 now_us)
 {
 	u64 bw_estimate_pps;
 	u64 flow_count_belief_unit;
@@ -523,7 +518,7 @@ static void update_cwnd(struct sock *sk, struct ndd_data *ndd,
 		((p_cwnd_averaging_factor_unit * target_cwnd_unit) >> P_SCALE);
 #ifdef NDD_DEBUG
 	printk(KERN_INFO
-	       "ndd cwnd_update_debug flow %u  alpha %u 1-alpha %u cwnd %u target_cwnd %llu next_cwnd %llu ",
+	       "ndd cwnd_update_debug flow %u alpha %u 1-alpha %u cwnd %u target_cwnd %llu next_cwnd %llu ",
 	       ndd->id, p_cwnd_averaging_factor_unit,
 	       p_inv_cwnd_averaging_factor_unit, tsk->snd_cwnd,
 	       target_cwnd_unit, next_cwnd_unit);
@@ -536,7 +531,7 @@ static void update_cwnd(struct sock *sk, struct ndd_data *ndd,
 
 	log_cwnd_update(sk, ndd, tsk, rtt_us, bw_estimate_pps,
 			flow_count_belief_unit, target_flow_count_unit,
-			target_cwnd_unit, next_cwnd_unit);
+			target_cwnd_unit, next_cwnd_unit, now_us);
 }
 
 static void on_ack(struct sock *sk, const struct rate_sample *rs)
@@ -572,7 +567,7 @@ static void on_ack(struct sock *sk, const struct rate_sample *rs)
 
 		// probe ended
 		if (ndd->s_probe_ongoing) {
-			update_cwnd(sk, ndd, tsk, rtt_us);
+			update_cwnd(sk, ndd, tsk, rtt_us, now_us);
 			reset_probe_state(ndd);
 		}
 
@@ -583,7 +578,7 @@ static void on_ack(struct sock *sk, const struct rate_sample *rs)
 		if (ndd->s_round_slots_till_now >= 1 && !ndd->s_round_probed &&
 		    should_probe(ndd)) {
 			ndd->s_round_probed = true;
-			start_probe(sk, ndd, tsk, rtt_us);
+			start_probe(sk, ndd, tsk, rtt_us, now_us);
 		}
 		start_new_slot(ndd, now_us);
 	}
