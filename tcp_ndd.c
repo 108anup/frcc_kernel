@@ -19,15 +19,18 @@ static const u32 p_ub_flow_count = 5;
 // Design parameters
 // TODO: check if these floating values make sense given the UNIT. Should we
 // change the unit?
-static const u32 p_lb_cwnd_pkts = 2;
+static const u32 p_lb_cwnd_pkts = 4;
+// ^^ this should be such that, p_cwnd_clamp_hi increases this by at least 1,
+// otherwise even at the maximum increase, the cwnd will not increase due to
+// integer arithmetic.
 static const u32 p_contract_min_qdel_us = p_ub_rtprop_us / 2;
 static const u32 p_probe_duration_us =
 	p_ub_rtterr_us; // ? Do we want something else here?
 static const u32 p_probe_multiplier_unit = P_UNIT * 4;
 static const u32 p_cwnd_averaging_factor_unit = P_UNIT * 1 / 2;
 static const u32 p_inv_cwnd_averaging_factor_unit = P_UNIT * 1 - p_cwnd_averaging_factor_unit;
-static const u32 p_cwnd_clamp_hi_unit = P_UNIT * 12 / 10;
-static const u32 p_cwnd_clamp_lo_unit = P_UNIT * 10 / 11;
+static const u32 p_cwnd_clamp_hi_unit = P_UNIT * 13 / 10;
+static const u32 p_cwnd_clamp_lo_unit = P_UNIT * 10 / 13;
 static const u32 p_slot_load_factor_unit = P_UNIT * 2;
 static const u32 p_slots_per_round =
 	(p_slot_load_factor_unit * p_ub_flow_count) >> P_SCALE;
@@ -482,11 +485,11 @@ static void update_cwnd(struct sock *sk, struct ndd_data *ndd,
 	u64 bw_estimate_pps;
 	u64 flow_count_belief_unit;
 	u64 target_flow_count_unit;
-	u64 fc_belief_hi_clamp;
-	u64 fc_belief_lo_clamp;
 	u64 target_cwnd_unit;
 	u64 next_cwnd_unit;
 	u32 next_cwnd;
+	u64 tcwnd_hi_clamp_unit = tsk->snd_cwnd * p_cwnd_clamp_hi_unit;
+	u64 tcwnd_lo_clamp_unit = tsk->snd_cwnd * p_cwnd_clamp_lo_unit;
 
 	bw_estimate_pps = U64_MAX;
 	if (ndd->s_probe_min_excess_delay_us > 0) {
@@ -504,22 +507,15 @@ static void update_cwnd(struct sock *sk, struct ndd_data *ndd,
 	// TODO: is this needed? we clamp flow_count_belief anyway.
 	// flow_count_belief_unit = min_t(u64, flow_count_belief_unit,
 	// p_ub_flow_count << P_SCALE);
-
-	// TODO: when target flow count is only slightly less than 1, we should
-	// not do big increase. Change proof also.
+	flow_count_belief_unit = max_t(u64, flow_count_belief_unit, P_UNIT);
 
 	target_flow_count_unit = get_target_flow_count_unit(ndd);
-	fc_belief_hi_clamp =
-		(target_flow_count_unit * p_cwnd_clamp_hi_unit) >> P_SCALE;
-	fc_belief_lo_clamp =
-		(target_flow_count_unit * p_cwnd_clamp_lo_unit) >> P_SCALE;
 
-	flow_count_belief_unit = max_t(u64, flow_count_belief_unit, P_UNIT);
-	flow_count_belief_unit =
-		max_t(u64, flow_count_belief_unit, fc_belief_lo_clamp);
-	flow_count_belief_unit =
-		min_t(u64, flow_count_belief_unit, fc_belief_hi_clamp);
-
+	// Even though in the proof we apply the clamps on Ni, we implement
+	// clamps on target_cwnd because of integer arithmetic
+	// (target_flow_count_unit might be small, so clamps times this might
+	// be same as target_flow_count_unit). We expect cwnd to be large so
+	// that the clamp times cwnd is a different value.
 	if (target_flow_count_unit == 0) {
 		target_cwnd_unit = tsk->snd_cwnd * p_cwnd_clamp_hi_unit;
 	} else {
@@ -527,6 +523,8 @@ static void update_cwnd(struct sock *sk, struct ndd_data *ndd,
 		target_cwnd_unit *= flow_count_belief_unit;
 		do_div(target_cwnd_unit, target_flow_count_unit);
 	}
+	target_cwnd_unit = max_t(u64, target_cwnd_unit, tcwnd_lo_clamp_unit);
+	target_cwnd_unit = min_t(u64, target_cwnd_unit, tcwnd_hi_clamp_unit);
 
 	next_cwnd_unit =
 		p_inv_cwnd_averaging_factor_unit * tsk->snd_cwnd +
