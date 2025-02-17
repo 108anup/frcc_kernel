@@ -4,7 +4,7 @@ NDD: A provably fair and robust congestion controller
 
 #include <net/tcp.h>
 
-#define NDD_DEBUG_VERBOSE
+// #define NDD_DEBUG_VERBOSE
 // #define NDD_DEBUG
 #define NDD_INFO
 
@@ -514,24 +514,15 @@ static void update_cwnd(struct sock *sk, struct ndd_data *ndd,
 	fc_belief_lo_clamp =
 		(target_flow_count_unit * p_cwnd_clamp_lo_unit) >> P_SCALE;
 
+	flow_count_belief_unit = max_t(u64, flow_count_belief_unit, P_UNIT);
+	flow_count_belief_unit =
+		max_t(u64, flow_count_belief_unit, fc_belief_lo_clamp);
 	flow_count_belief_unit =
 		min_t(u64, flow_count_belief_unit, fc_belief_hi_clamp);
 
-	if (target_flow_count_unit < P_UNIT) {
-		flow_count_belief_unit = fc_belief_hi_clamp;
-	} else {
-		flow_count_belief_unit =
-			max_t(u64, flow_count_belief_unit, fc_belief_lo_clamp);
-	}
-
-	if (target_flow_count_unit < P_UNIT) {
-		target_cwnd_unit = tsk->snd_cwnd * p_cwnd_clamp_hi_unit;
-	}
-	else {
-		target_cwnd_unit = tsk->snd_cwnd << P_SCALE;
-		target_cwnd_unit *= flow_count_belief_unit;
-		do_div(target_cwnd_unit, target_flow_count_unit);
-	}
+	target_cwnd_unit = tsk->snd_cwnd << P_SCALE;
+	target_cwnd_unit *= flow_count_belief_unit;
+	do_div(target_cwnd_unit, target_flow_count_unit);
 
 	next_cwnd_unit =
 		p_inv_cwnd_averaging_factor_unit * tsk->snd_cwnd +
