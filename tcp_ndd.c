@@ -520,9 +520,13 @@ static void update_cwnd(struct sock *sk, struct ndd_data *ndd,
 	flow_count_belief_unit =
 		min_t(u64, flow_count_belief_unit, fc_belief_hi_clamp);
 
-	target_cwnd_unit = tsk->snd_cwnd << P_SCALE;
-	target_cwnd_unit *= flow_count_belief_unit;
-	do_div(target_cwnd_unit, target_flow_count_unit);
+	if (target_flow_count_unit == 0) {
+		target_cwnd_unit = tsk->snd_cwnd * p_cwnd_clamp_hi_unit;
+	} else {
+		target_cwnd_unit = tsk->snd_cwnd << P_SCALE;
+		target_cwnd_unit *= flow_count_belief_unit;
+		do_div(target_cwnd_unit, target_flow_count_unit);
+	}
 
 	next_cwnd_unit =
 		p_inv_cwnd_averaging_factor_unit * tsk->snd_cwnd +
