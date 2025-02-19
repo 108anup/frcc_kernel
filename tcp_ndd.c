@@ -26,8 +26,7 @@ static const u32 p_lb_cwnd_pkts = 4;
 static const u32 p_contract_min_qdel_us = p_ub_rtprop_us / 2;
 // for stability p_contract_min_qdel_us >= rtprop / ground_truth_flow_count,
 // for error, we need p_contract_min_qdel_us >= 2 * p_ub_rtterr_us
-static const u32 p_probe_duration_us =
-	p_ub_rtterr_us; // ? Do we want something else here?
+static const u32 p_probe_duration_us = 10000; // 10 ms. How should this be set?
 static const u32 p_probe_multiplier_unit = P_UNIT * 4;
 static const u32 p_cwnd_averaging_factor_unit = P_UNIT * 1;
 static const u32 p_inv_cwnd_averaging_factor_unit = P_UNIT * 1 - p_cwnd_averaging_factor_unit;
