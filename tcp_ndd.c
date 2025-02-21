@@ -636,21 +636,22 @@ static void slow_start(struct sock *sk, struct tcp_sock *tsk,
 	bool ss_ended = ndd->s_ss_last_seq > 0 &&
 			after(last_recv_seq, ndd->s_ss_last_seq);
 
-	if (ss_ended) {
-		ndd->s_ss_done = true;
-		reset_round_state(ndd);
-		start_new_slot(ndd, now_us);
-
-	} else if (!ndd->s_ss_end_initiated) {
-		if (should_init_ss_end) {
-			ndd->s_ss_end_initiated = true;
-			ndd->s_ss_last_seq = last_snd_seq;
-		} else {
+	if (!ndd->s_ss_end_initiated) {
+		if (!should_init_ss_end) {
 			tsk->snd_cwnd += 1;
 			update_pacing_rate(sk, tsk, rtt_us);
+		} else {
+			ndd->s_ss_end_initiated = true;
+			ndd->s_ss_last_seq = last_snd_seq;
 		}
 	} else {
-		// ss end initiated but not yet ended. do nothing.
+		if (ss_ended) {
+			ndd->s_ss_done = true;
+			reset_round_state(ndd);
+			start_new_slot(ndd, now_us);
+		} else {
+			// ss end initiated but not yet ended. do nothing.
+		}
 	}
 }
 
@@ -690,28 +691,40 @@ static void rprobe(struct sock *sk, struct ndd_data *ndd, struct tcp_sock *tsk,
 
 		tsk->snd_cwnd = p_lb_cwnd_pkts;
 		update_pacing_rate(sk, tsk, rtt_us);
-	} else {
-		if (!ndd->s_rprobe->s_rprobe_end_initiated) {
-			if (should_init_rprobe_end) {
-				ndd->s_rprobe->s_rprobe_end_initiated = true;
-				ndd->s_rprobe->s_rprobe_last_seq = last_snd_seq;
+		return;
+	}
 
-				tsk->snd_cwnd =
-					ndd->s_rprobe->s_rprobe_prev_cwnd_pkts;
-				update_pacing_rate(sk, tsk, rtt_us);
-			}
-		} else {
-			if (rprobe_ended) {
-				ndd->s_rprobe->s_rprobe_ongoing = false;
-				ndd->s_rprobe->s_rprobe_prev_start_time_us =
-					get_rprobe_time(
-						ndd->s_rprobe
-							->s_rprobe_start_time_us);
-				ndd->s_rprobe->s_rprobe_start_time_us = 0;
-				ndd->s_rprobe->s_rprobe_end_initiated = false;
-				ndd->s_rprobe->s_rprobe_last_seq = 0;
-				ndd->s_rprobe->s_rprobe_prev_cwnd_pkts = 0;
-			}
+	// rprobe ongoing
+	if (!ndd->s_rprobe->s_rprobe_end_initiated) {
+		if (should_init_rprobe_end) {
+			ndd->s_rprobe->s_rprobe_end_initiated = true;
+			ndd->s_rprobe->s_rprobe_last_seq = last_snd_seq;
+
+			tsk->snd_cwnd =
+				ndd->s_rprobe->s_rprobe_prev_cwnd_pkts;
+			update_pacing_rate(sk, tsk, rtt_us);
+		}
+	} else {
+		if (rprobe_ended) {
+			ndd->s_rprobe->s_rprobe_ongoing = false;
+			ndd->s_rprobe->s_rprobe_prev_start_time_us =
+				get_rprobe_time(
+					ndd->s_rprobe
+						->s_rprobe_start_time_us);
+			ndd->s_rprobe->s_rprobe_start_time_us = 0;
+			ndd->s_rprobe->s_rprobe_end_initiated = false;
+			ndd->s_rprobe->s_rprobe_last_seq = 0;
+			ndd->s_rprobe->s_rprobe_prev_cwnd_pkts = 0;
+
+			// slow start may also be ongoing, in that
+			// case, we do not touch slow start state. If
+			// if ss end had been initiated then rprobe end
+			// does the same thing, if end was not
+			// initiated, we go back to slow start, now
+			// with a better rtprop estimate.
+			reset_probe_state(ndd);
+			reset_round_state(ndd);
+			start_new_slot(ndd, now_us);
 		}
 	}
 }
@@ -738,17 +751,18 @@ static void on_ack(struct sock *sk, const struct rate_sample *rs)
 
 	log_periodic(sk, ndd, tsk, rtt_us, now_us);
 
-	if (!ndd->s_ss_done) {
-		slow_start(sk, tsk, ndd, now_us, rtt_us);
-		return;
-	}
-
 #ifdef USE_RTPROP_PROBE
 	if (should_rprobe(ndd, now_us) || ndd->s_rprobe->s_rprobe_ongoing) {
 		rprobe(sk, ndd, tsk, rtt_us, now_us);
 		return;
 	}
 #endif
+
+	if (!ndd->s_ss_done) {
+		slow_start(sk, tsk, ndd, now_us, rtt_us);
+		return;
+	}
+
 
 	if (ndd->s_probe->s_probe_ongoing && should_init_probe_end(ndd, tsk)) {
 		ndd->s_probe->s_probe_end_initiated = true;
