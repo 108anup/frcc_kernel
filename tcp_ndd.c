@@ -593,9 +593,15 @@ static void slow_start(struct sock *sk, struct tcp_sock *tsk,
 	// So instead we just say we want rtt to be more than min rtt +
 	// contract_const + max_jitter, this ensures that we built a queue of
 	// at least contract_const.
+
+	// slot min rtt will be very small after slow start, it will be same as
+	// the rtprop because both are min rtt since flow start, resetting the
+	// slot min rtt will help get fresher estimate of queueing delay.
 	if (rtt_us >
 	    ndd->s_min_rtprop_us + p_contract_min_qdel_us + p_ub_rtterr_us) {
 		ndd->s_slow_start_done = true;
+		reset_round_state(ndd);
+		start_new_slot(ndd, now_us);
 	} else {
 		tsk->snd_cwnd += 1;
 		update_pacing_rate(sk, tsk, rtt_us);
