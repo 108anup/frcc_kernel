@@ -51,6 +51,8 @@ struct ndd_data {
 	u64 last_log_time_us;
 
 	// State variables
+	bool s_slow_start_done;
+
 	u32 s_min_rtprop_us;
 
 	u32 s_round_slots_till_now;
@@ -83,7 +85,10 @@ static void ndd_init(struct sock *sk)
 	ndd->id = id;
 	ndd->last_log_time_us = 0;
 
-	ndd->s_min_rtprop_us = p_ub_rtprop_us;
+	ndd->s_slow_start_done = false;
+
+	ndd->s_min_rtprop_us = U32_MAX;
+	// TODO: we should reset this at some time to accommodate path changes.
 
 	ndd->s_round_slots_till_now = 0;
 	ndd->s_round_min_rtt_us = U32_MAX;
@@ -578,6 +583,17 @@ static void log_periodic(struct sock *sk, struct ndd_data *ndd,
 #endif
 }
 
+static void slow_start(struct tcp_sock *tsk, struct ndd_data *ndd, u64 now_us)
+{
+	u32 target_flow_count_unit = get_target_flow_count_unit(ndd);
+	if (target_flow_count_unit >= P_UNIT) {
+		ndd->s_slow_start_done = true;
+	}
+	else {
+		tsk->snd_cwnd += 1;
+	}
+}
+
 static void on_ack(struct sock *sk, const struct rate_sample *rs)
 {
 	struct ndd_data *ndd = inet_csk_ca(sk);
@@ -599,6 +615,11 @@ static void on_ack(struct sock *sk, const struct rate_sample *rs)
 	}
 
 	log_periodic(sk, ndd, tsk, rtt_us, now_us);
+
+	if (!ndd->s_slow_start_done) {
+		slow_start(tsk, ndd, now_us);
+		return;
+	}
 
 	if (ndd->s_probe_ongoing && should_init_probe_end(ndd, tsk)) {
 		ndd->s_probe_end_initiated = true;
