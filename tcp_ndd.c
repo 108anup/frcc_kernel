@@ -583,13 +583,20 @@ static void log_periodic(struct sock *sk, struct ndd_data *ndd,
 #endif
 }
 
-static void slow_start(struct tcp_sock *tsk, struct ndd_data *ndd, u64 now_us)
+static void slow_start(struct tcp_sock *tsk, struct ndd_data *ndd, u64 now_us,
+		       u32 rtt_us)
 {
-	u32 target_flow_count_unit = get_target_flow_count_unit(ndd);
-	if (target_flow_count_unit >= P_UNIT) {
+	// Directly saying do slow start until target_flow_count is 1 is not
+	// good because we use both min rtt to estimate rtprop and qdelay, so
+	// the qdelay estimate is 0, as we only timeout after a round.
+
+	// So instead we just say we want rtt to be more than min rtt +
+	// contract_const + max_jitter, this ensures that we built a queue of
+	// at least contract_const.
+	if (rtt_us >
+	    ndd->s_min_rtprop_us + p_contract_min_qdel_us + p_ub_rtterr_us) {
 		ndd->s_slow_start_done = true;
-	}
-	else {
+	} else {
 		tsk->snd_cwnd += 1;
 	}
 }
@@ -617,7 +624,7 @@ static void on_ack(struct sock *sk, const struct rate_sample *rs)
 	log_periodic(sk, ndd, tsk, rtt_us, now_us);
 
 	if (!ndd->s_slow_start_done) {
-		slow_start(tsk, ndd, now_us);
+		slow_start(tsk, ndd, now_us, rtt_us);
 		return;
 	}
 
