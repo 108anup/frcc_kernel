@@ -51,9 +51,11 @@ struct ndd_data {
 	u64 last_log_time_us;
 
 	// State variables
-	bool s_slow_start_done;
-
 	u32 s_min_rtprop_us;
+
+	bool s_ss_done;
+	bool s_ss_end_initiated;
+	u64 s_ss_last_seq;
 
 	u32 s_round_slots_till_now;
 	u32 s_round_min_rtt_us;
@@ -85,10 +87,10 @@ static void ndd_init(struct sock *sk)
 	ndd->id = id;
 	ndd->last_log_time_us = 0;
 
-	ndd->s_slow_start_done = false;
-
 	ndd->s_min_rtprop_us = U32_MAX;
 	// TODO: we should reset this at some time to accommodate path changes.
+
+	ndd->s_ss_done = false;
 
 	ndd->s_round_slots_till_now = 0;
 	ndd->s_round_min_rtt_us = U32_MAX;
@@ -597,14 +599,30 @@ static void slow_start(struct sock *sk, struct tcp_sock *tsk,
 	// slot min rtt will be very small after slow start, it will be same as
 	// the rtprop because both are min rtt since flow start, resetting the
 	// slot min rtt will help get fresher estimate of queueing delay.
-	if (rtt_us >
-	    ndd->s_min_rtprop_us + p_contract_min_qdel_us + p_ub_rtterr_us) {
-		ndd->s_slow_start_done = true;
+
+	u64 last_recv_seq = get_last_rcv_seq(tsk);
+	u64 last_snd_seq = get_last_snd_seq(tsk);
+	bool should_init_ss_end = rtt_us > ndd->s_min_rtprop_us +
+						   p_contract_min_qdel_us +
+						   p_ub_rtterr_us;
+	bool ss_ended = ndd->s_ss_last_seq > 0 &&
+			after(last_recv_seq, ndd->s_ss_last_seq);
+
+	if (ss_ended) {
+		ndd->s_ss_done = true;
 		reset_round_state(ndd);
 		start_new_slot(ndd, now_us);
+
+	} else if (!ndd->s_ss_end_initiated) {
+		if (should_init_ss_end) {
+			ndd->s_ss_end_initiated = true;
+			ndd->s_ss_last_seq = last_snd_seq;
+		} else {
+			tsk->snd_cwnd += 1;
+			update_pacing_rate(sk, tsk, rtt_us);
+		}
 	} else {
-		tsk->snd_cwnd += 1;
-		update_pacing_rate(sk, tsk, rtt_us);
+		// ss end initiated but not yet ended. do nothing.
 	}
 }
 
@@ -630,7 +648,7 @@ static void on_ack(struct sock *sk, const struct rate_sample *rs)
 
 	log_periodic(sk, ndd, tsk, rtt_us, now_us);
 
-	if (!ndd->s_slow_start_done) {
+	if (!ndd->s_ss_done) {
 		slow_start(sk, tsk, ndd, now_us, rtt_us);
 		return;
 	}
