@@ -583,8 +583,8 @@ static void log_periodic(struct sock *sk, struct ndd_data *ndd,
 #endif
 }
 
-static void slow_start(struct tcp_sock *tsk, struct ndd_data *ndd, u64 now_us,
-		       u32 rtt_us)
+static void slow_start(struct sock *sk, struct tcp_sock *tsk,
+		       struct ndd_data *ndd, u64 now_us, u32 rtt_us)
 {
 	// Directly saying do slow start until target_flow_count is 1 is not
 	// good because we use both min rtt to estimate rtprop and qdelay, so
@@ -598,6 +598,7 @@ static void slow_start(struct tcp_sock *tsk, struct ndd_data *ndd, u64 now_us,
 		ndd->s_slow_start_done = true;
 	} else {
 		tsk->snd_cwnd += 1;
+		update_pacing_rate(sk, tsk, rtt_us);
 	}
 }
 
@@ -624,7 +625,7 @@ static void on_ack(struct sock *sk, const struct rate_sample *rs)
 	log_periodic(sk, ndd, tsk, rtt_us, now_us);
 
 	if (!ndd->s_slow_start_done) {
-		slow_start(tsk, ndd, now_us, rtt_us);
+		slow_start(sk, tsk, ndd, now_us, rtt_us);
 		return;
 	}
 
