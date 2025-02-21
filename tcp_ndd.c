@@ -8,6 +8,8 @@ NDD: A provably fair and robust congestion controller
 // #define NDD_DEBUG
 #define NDD_INFO
 
+#define USE_RTPROP_PROBE
+
 #define P_SCALE 8 /* scaling factor for fractions (e.g. gains) */
 #define P_UNIT (1 << P_SCALE)
 
@@ -35,6 +37,7 @@ static const u32 p_cwnd_clamp_lo_unit = P_UNIT * 10 / 13;
 static const u32 p_slot_load_factor_unit = P_UNIT * 2;
 static const u32 p_slots_per_round =
 	(p_slot_load_factor_unit * p_ub_flow_count) >> P_SCALE;
+static const u32 p_rprobe_interval_us = 30000000; // 30 seconds
 
 static u32 id = 0;
 
@@ -51,6 +54,15 @@ struct probe_data {
 	u64 s_probe_first_seq;
 	u64 s_probe_last_seq;
 	u64 s_probe_first_seq_snd_time;
+};
+
+struct rprobe_data {
+	u64 s_rprobe_prev_start_time_us;
+	bool s_rprobe_ongoing;
+	u64 s_rprobe_start_time_us;
+	u32 s_rprobe_prev_cwnd_pkts;
+	bool s_rprobe_end_initiated;
+	u64 s_rprobe_last_seq;
 };
 
 struct ndd_data {
@@ -79,6 +91,7 @@ struct ndd_data {
 	u32 s_slot_max_rtt_us; // for logging only
 
 	struct probe_data *s_probe;
+	struct rprobe_data *s_rprobe;
 };
 
 static void ndd_init(struct sock *sk)
@@ -120,6 +133,14 @@ static void ndd_init(struct sock *sk)
 	ndd->s_probe->s_probe_first_seq = 0;
 	ndd->s_probe->s_probe_last_seq = 0;
 	ndd->s_probe->s_probe_first_seq_snd_time = 0;
+
+	ndd->s_rprobe = kzalloc(sizeof(struct rprobe_data), GFP_KERNEL);
+	ndd->s_rprobe->s_rprobe_prev_start_time_us = 0;
+	ndd->s_rprobe->s_rprobe_ongoing = false;
+	ndd->s_rprobe->s_rprobe_start_time_us = 0;
+	ndd->s_rprobe->s_rprobe_prev_cwnd_pkts = 0;
+	ndd->s_rprobe->s_rprobe_end_initiated = false;
+	ndd->s_rprobe->s_rprobe_last_seq = 0;
 
 	cmpxchg(&sk->sk_pacing_status, SK_PACING_NONE, SK_PACING_NEEDED);
 }
@@ -633,6 +654,68 @@ static void slow_start(struct sock *sk, struct tcp_sock *tsk,
 	}
 }
 
+static u64 get_rprobe_time(u64 time_us)
+{
+	return (time_us / p_rprobe_interval_us) * p_rprobe_interval_us;
+}
+
+static bool should_rprobe(struct ndd_data *ndd, u64 now_us)
+{
+	return tcp_stamp_us_delta(now_us,
+				  ndd->s_rprobe->s_rprobe_prev_start_time_us) >
+	       p_rprobe_interval_us;
+}
+
+static void rprobe(struct sock *sk, struct ndd_data *ndd, struct tcp_sock *tsk,
+		   u32 rtt_us, u64 now_us)
+{
+	u64 last_rcv_seq = get_last_rcv_seq(tsk);
+	u64 last_snd_seq = get_last_snd_seq(tsk);
+	u64 rprobe_duration_us = ndd->s_slot_max_qdel_us + p_ub_rtprop_us;
+	u64 init_rprobe_end_us =
+		ndd->s_rprobe->s_rprobe_start_time_us + rprobe_duration_us;
+	bool should_init_rprobe_end = time_after64(now_us, init_rprobe_end_us);
+	bool rprobe_ended =
+		ndd->s_rprobe->s_rprobe_last_seq > 0 &&
+		after(last_rcv_seq, ndd->s_rprobe->s_rprobe_last_seq);
+
+	if (!ndd->s_rprobe->s_rprobe_ongoing) {
+		ndd->s_rprobe->s_rprobe_ongoing = true;
+		ndd->s_rprobe->s_rprobe_prev_start_time_us =
+			get_rprobe_time(now_us);
+		ndd->s_rprobe->s_rprobe_start_time_us = now_us;
+		ndd->s_rprobe->s_rprobe_prev_cwnd_pkts = tsk->snd_cwnd;
+		ndd->s_rprobe->s_rprobe_end_initiated = false;
+		ndd->s_rprobe->s_rprobe_last_seq = 0;
+
+		tsk->snd_cwnd = p_lb_cwnd_pkts;
+		update_pacing_rate(sk, tsk, rtt_us);
+	} else {
+		if (!ndd->s_rprobe->s_rprobe_end_initiated) {
+			if (should_init_rprobe_end) {
+				ndd->s_rprobe->s_rprobe_end_initiated = true;
+				ndd->s_rprobe->s_rprobe_last_seq = last_snd_seq;
+
+				tsk->snd_cwnd =
+					ndd->s_rprobe->s_rprobe_prev_cwnd_pkts;
+				update_pacing_rate(sk, tsk, rtt_us);
+			}
+		} else {
+			if (rprobe_ended) {
+				ndd->s_rprobe->s_rprobe_ongoing = false;
+				ndd->s_rprobe->s_rprobe_prev_start_time_us =
+					get_rprobe_time(
+						ndd->s_rprobe
+							->s_rprobe_start_time_us);
+				ndd->s_rprobe->s_rprobe_start_time_us = 0;
+				ndd->s_rprobe->s_rprobe_end_initiated = false;
+				ndd->s_rprobe->s_rprobe_last_seq = 0;
+				ndd->s_rprobe->s_rprobe_prev_cwnd_pkts = 0;
+			}
+		}
+	}
+}
+
 static void on_ack(struct sock *sk, const struct rate_sample *rs)
 {
 	struct ndd_data *ndd = inet_csk_ca(sk);
@@ -659,6 +742,13 @@ static void on_ack(struct sock *sk, const struct rate_sample *rs)
 		slow_start(sk, tsk, ndd, now_us, rtt_us);
 		return;
 	}
+
+#ifdef USE_RTPROP_PROBE
+	if (should_rprobe(ndd, now_us) || ndd->s_rprobe->s_rprobe_ongoing) {
+		rprobe(sk, ndd, tsk, rtt_us, now_us);
+		return;
+	}
+#endif
 
 	if (ndd->s_probe->s_probe_ongoing && should_init_probe_end(ndd, tsk)) {
 		ndd->s_probe->s_probe_end_initiated = true;
@@ -694,6 +784,7 @@ static void ndd_release(struct sock *sk)
 {
 	struct ndd_data *ndd = inet_csk_ca(sk);
 	kfree(ndd->s_probe);
+	kfree(ndd->s_rprobe);
 }
 
 static u32 ndd_ssthresh(struct sock *sk)
