@@ -57,12 +57,12 @@ struct probe_data {
 };
 
 struct rprobe_data {
-	u64 s_rprobe_prev_start_time_us;
 	bool s_rprobe_ongoing;
+	u64 s_rprobe_prev_start_time_us;
 	u64 s_rprobe_start_time_us;
+	u64 s_rprobe_init_end_time_us;
 	u32 s_rprobe_prev_cwnd_pkts;
 	bool s_rprobe_end_initiated;
-	u64 s_rprobe_last_seq;
 };
 
 struct ndd_data {
@@ -144,12 +144,12 @@ static void ndd_init(struct sock *sk)
 	ndd->s_probe->s_probe_first_seq_snd_time = 0;
 
 	ndd->s_rprobe = kzalloc(sizeof(struct rprobe_data), GFP_KERNEL);
-	ndd->s_rprobe->s_rprobe_prev_start_time_us = 0;
 	ndd->s_rprobe->s_rprobe_ongoing = false;
+	ndd->s_rprobe->s_rprobe_prev_start_time_us = 0;
 	ndd->s_rprobe->s_rprobe_start_time_us = 0;
+	ndd->s_rprobe->s_rprobe_init_end_time_us = 0;
 	ndd->s_rprobe->s_rprobe_prev_cwnd_pkts = 0;
 	ndd->s_rprobe->s_rprobe_end_initiated = false;
-	ndd->s_rprobe->s_rprobe_last_seq = 0;
 
 	cmpxchg(&sk->sk_pacing_status, SK_PACING_NONE, SK_PACING_NEEDED);
 }
@@ -701,24 +701,23 @@ static bool should_rprobe(struct ndd_data *ndd, u64 now_us)
 static void rprobe(struct sock *sk, struct ndd_data *ndd, struct tcp_sock *tsk,
 		   u32 rtt_us, u64 now_us)
 {
-	u64 last_rcv_seq = get_last_rcv_seq(tsk);
-	u64 last_snd_seq = get_last_snd_seq(tsk);
 	u64 rprobe_duration_us = ndd->s_slot_max_qdel_us + p_ub_rtprop_us;
 	u64 init_rprobe_end_us =
 		ndd->s_rprobe->s_rprobe_start_time_us + rprobe_duration_us;
 	bool should_init_rprobe_end = time_after64(now_us, init_rprobe_end_us);
-	bool rprobe_ended =
-		ndd->s_rprobe->s_rprobe_last_seq > 0 &&
-		after(last_rcv_seq, ndd->s_rprobe->s_rprobe_last_seq);
+	u64 rprobe_end_us = ndd->s_rprobe->s_rprobe_init_end_time_us +
+			    2 * rprobe_duration_us;
+	bool rprobe_ended = ndd->s_rprobe->s_rprobe_init_end_time_us > 0 &&
+			    time_after64(now_us, rprobe_end_us);
 
 	if (!ndd->s_rprobe->s_rprobe_ongoing) {
 		ndd->s_rprobe->s_rprobe_ongoing = true;
 		ndd->s_rprobe->s_rprobe_prev_start_time_us =
 			get_rprobe_time(now_us);
 		ndd->s_rprobe->s_rprobe_start_time_us = now_us;
+		ndd->s_rprobe->s_rprobe_init_end_time_us = 0;
 		ndd->s_rprobe->s_rprobe_prev_cwnd_pkts = tsk->snd_cwnd;
 		ndd->s_rprobe->s_rprobe_end_initiated = false;
-		ndd->s_rprobe->s_rprobe_last_seq = 0;
 
 		tsk->snd_cwnd = p_lb_cwnd_pkts;
 		// update_pacing_rate(sk, tsk, rtt_us);
@@ -733,8 +732,7 @@ static void rprobe(struct sock *sk, struct ndd_data *ndd, struct tcp_sock *tsk,
 	if (!ndd->s_rprobe->s_rprobe_end_initiated) {
 		if (should_init_rprobe_end) {
 			ndd->s_rprobe->s_rprobe_end_initiated = true;
-			ndd->s_rprobe->s_rprobe_last_seq = last_snd_seq;
-
+			ndd->s_rprobe->s_rprobe_init_end_time_us = now_us;
 			tsk->snd_cwnd =
 				ndd->s_rprobe->s_rprobe_prev_cwnd_pkts;
 			update_pacing_rate(sk, tsk, rtt_us);
@@ -748,8 +746,8 @@ static void rprobe(struct sock *sk, struct ndd_data *ndd, struct tcp_sock *tsk,
 					ndd->s_rprobe
 						->s_rprobe_start_time_us);
 			ndd->s_rprobe->s_rprobe_start_time_us = 0;
+			ndd->s_rprobe->s_rprobe_init_end_time_us = 0;
 			ndd->s_rprobe->s_rprobe_end_initiated = false;
-			ndd->s_rprobe->s_rprobe_last_seq = 0;
 			ndd->s_rprobe->s_rprobe_prev_cwnd_pkts = 0;
 
 			// slow start may also be ongoing, in that
