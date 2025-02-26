@@ -97,6 +97,7 @@ struct ndd_data {
 
 enum cwnd_event {
 	SLOW_START,
+	SLOW_START_END,
 	PROBE_GAIN,
 	PROBE_DRAIN,
 	PROBE_UPDATE,
@@ -689,6 +690,13 @@ static void slow_start(struct sock *sk, struct tcp_sock *tsk,
 			update_pacing_rate(sk, tsk, rtt_us);
 			log_cwnd(SLOW_START, sk, ndd, tsk, rtt_us, now_us);
 		} else {
+			// The ACK that showed high delay used a cwnd that is
+			// half of waht it is now, so we revert back to that
+			// cwnd.
+			tsk->snd_cwnd = tsk->snd_cwnd / 2;
+			tsk->snd_cwnd = max_t(u32, tsk->snd_cwnd, p_lb_cwnd_pkts);
+			update_pacing_rate(sk, tsk, rtt_us);
+			log_cwnd(SLOW_START_END, sk, ndd, tsk, rtt_us, now_us);
 			ndd->s_ss_end_initiated = true;
 			ndd->s_ss_last_seq = last_snd_seq;
 		}
@@ -739,12 +747,17 @@ static void rprobe(struct sock *sk, struct ndd_data *ndd, struct tcp_sock *tsk,
 		ndd->s_rprobe->s_rprobe_start_time_us = now_us;
 		ndd->s_rprobe->s_rprobe_init_end_time_us = 0;
 		ndd->s_rprobe->s_rprobe_prev_cwnd_pkts = tsk->snd_cwnd;
+		if (ndd->s_probe->s_probe_ongoing) {
+			// if a capacity probe was ongoing, we need to reset to
+			// the cwnd before the probe.
+			ndd->s_rprobe->s_rprobe_prev_cwnd_pkts =
+				ndd->s_probe->s_probe_prev_cwnd_pkts;
+		}
 		ndd->s_rprobe->s_rprobe_end_initiated = false;
 
 		tsk->snd_cwnd = p_lb_cwnd_pkts;
 		// update_pacing_rate(sk, tsk, rtt_us);
-
-		// do not update pacing rate here, as linux takes time to
+		// ^^ do not update pacing rate here, as linux takes time to
 		// increase rate after decrease.
 		log_cwnd(RPROBE_DRAIN, sk, ndd, tsk, rtt_us, now_us);
 		return;
