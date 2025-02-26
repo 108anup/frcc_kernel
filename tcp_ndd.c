@@ -9,13 +9,14 @@ NDD: A provably fair and robust congestion controller
 #define NDD_INFO
 
 #define USE_RTPROP_PROBE
+// #define WAIT_RTT_AFTER_PROBE
 
 #define P_SCALE 8 /* scaling factor for fractions (e.g. gains) */
 #define P_UNIT (1 << P_SCALE)
 
 // Assumptions about network scenarios
-static const u32 p_ub_rtprop_us = 100000; // 100 ms
-static const u32 p_ub_rtterr_us = 25000; // 25 ms
+static const u32 p_ub_rtprop_us = 10000; // 10 ms
+static const u32 p_ub_rtterr_us = 10000; // 10 ms
 static const u32 p_ub_flow_count = 5;
 
 // Design parameters
@@ -270,9 +271,17 @@ static bool probe_ended(struct ndd_data *ndd, struct tcp_sock *tsk)
 
 static bool cruise_ended(struct ndd_data *ndd, u64 now_us)
 {
-	u64 slot_duration_us = 3 * (ndd->s_slot_max_qdel_us + p_ub_rtprop_us) +
-			       p_probe_duration_us;
-	u64 slot_end_us = ndd->s_slot_start_time_us + slot_duration_us;
+	// Super conservative
+	// u64 slot_duration_us = 3 * (ndd->s_slot_max_qdel_us +
+	// p_ub_rtprop_us) + p_probe_duration_us;
+	u64 slot_end_us;
+	u64 slot_duration_us = 3 * ndd->s_slot_max_qdel_us +
+			       2 * p_ub_rtprop_us + p_probe_duration_us;
+#ifndef WAIT_RTT_AFTER_PROBE
+	slot_duration_us = 2 * ndd->s_slot_max_qdel_us + p_ub_rtprop_us +
+			   p_probe_duration_us;
+#endif
+	slot_end_us = ndd->s_slot_start_time_us + slot_duration_us;
 	return time_after64(now_us, slot_end_us);
 }
 
@@ -451,16 +460,24 @@ static void update_probe_state(struct ndd_data *ndd, struct tcp_sock *tsk,
 #endif
 
 	if (ndd->s_probe->s_probe_inflightmatch_seq == 0) {
-		// TODO: currently assuming the inflight match will happen
-		// within 1 RTT, ideally just check inflight = cwnd.
+		// The inflight match will happen after half pre-probe-RTT (old
+		// RTT) under our pacing rate = 2 * new cwnd / old_rtt, i.e.,
+		// last packet of new cwnd sent at time old_rtt/2.
+		// Conservatively, we wait a full (packet timed) new RTT.
+		// Alternatively, we can just check inflight = cwnd.
 		if (after(last_rcv_seq, ndd->s_probe->s_probe_start_seq)) {
 			ndd->s_probe->s_probe_inflightmatch_seq = last_snd_seq;
+#ifndef WAIT_RTT_AFTER_PROBE
+			ndd->s_probe->s_probe_first_seq = last_snd_seq;
+			ndd->s_probe->s_probe_first_seq_snd_time = now_us;
+#endif
 #ifdef NDD_DEBUG
 			printk(KERN_INFO
 			       "ndd probe_inflightmatch flow %u "
-			       "probe_inflightmatch_seq %llu last_snd_seq %llu last_rcv_seq %llu ",
+			       "probe_inflightmatch_seq %llu probe_first_seq %llu last_snd_seq %llu last_rcv_seq %llu ",
 			       ndd->id, ndd->s_probe->s_probe_inflightmatch_seq,
-			       last_snd_seq, last_rcv_seq);
+			       ndd->s_probe->s_probe_first_seq, last_snd_seq,
+			       last_rcv_seq);
 #endif
 		}
 	} else if (ndd->s_probe->s_probe_first_seq == 0) {
@@ -701,12 +718,17 @@ static bool should_rprobe(struct ndd_data *ndd, u64 now_us)
 static void rprobe(struct sock *sk, struct ndd_data *ndd, struct tcp_sock *tsk,
 		   u32 rtt_us, u64 now_us)
 {
+	// Note, these values only make sense when the boolean conditions they
+	// are used in are met.
 	u64 rprobe_duration_us = ndd->s_slot_max_qdel_us + p_ub_rtprop_us;
 	u64 init_rprobe_end_us =
 		ndd->s_rprobe->s_rprobe_start_time_us + rprobe_duration_us;
 	bool should_init_rprobe_end = time_after64(now_us, init_rprobe_end_us);
 	u64 rprobe_end_us = ndd->s_rprobe->s_rprobe_init_end_time_us +
 			    2 * rprobe_duration_us;
+	// Above, we wait two RTTs becuase it takes one RTT to fill the
+	// inflight and then one more RTT to get the ACK of the last packet of
+	// the filled inflight.
 	bool rprobe_ended = ndd->s_rprobe->s_rprobe_init_end_time_us > 0 &&
 			    time_after64(now_us, rprobe_end_us);
 
