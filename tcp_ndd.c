@@ -6,15 +6,17 @@ NDD: A provably fair and robust congestion controller
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 
-// #define NDD_DEBUG_VERBOSE
-// #define NDD_DEBUG
-#define NDD_INFO
-
-#define USE_RTPROP_PROBE
-// #define WAIT_RTT_AFTER_PROBE
+#define NDD_LOG
 
 #define P_SCALE 8 /* scaling factor for fractions (e.g. gains) */
 #define P_UNIT (1 << P_SCALE)
+
+enum log_level {
+	LOG_INFO,
+	LOG_DEBUG,
+	LOG_TRACE,
+};
+static enum log_level static_log_level = LOG_INFO;
 
 // Assumptions about network scenarios
 static u32 static_p_ub_rtprop_us = 10000; // 10 ms
@@ -39,6 +41,11 @@ static u32 static_p_cwnd_clamp_lo_unit = P_UNIT * 10 / 13;
 static u32 static_p_slot_load_factor_unit = P_UNIT * 2;
 static u32 static_p_rprobe_interval_us = 30000000; // 30 seconds
 
+// Design features
+static bool static_f_use_rtprop_probe = true;
+static bool static_f_wait_rtt_after_probe = false;
+static bool static_f_use_stable_cwnd_update = true;
+
 // Make all parameters runtime configurable
 // https://devarea.com/linux-kernel-development-kernel-module-parameters/
 module_param(static_p_ub_rtprop_us, uint, 0660);
@@ -53,6 +60,9 @@ module_param(static_p_cwnd_clamp_hi_unit, uint, 0660);
 module_param(static_p_cwnd_clamp_lo_unit, uint, 0660);
 module_param(static_p_slot_load_factor_unit, uint, 0660);
 module_param(static_p_rprobe_interval_us, uint, 0660);
+module_param(static_f_use_rtprop_probe, bool, 0660);
+module_param(static_f_wait_rtt_after_probe, bool, 0660);
+module_param(static_f_use_stable_cwnd_update, bool, 0660);
 
 static u32 id = 0;
 
@@ -74,6 +84,11 @@ struct param_data {
 	u32 p_slot_load_factor_unit;
 	u32 p_slots_per_round;
 	u32 p_rprobe_interval_us;
+
+	// Design features
+	bool f_use_rtprop_probe;
+	bool f_wait_rtt_after_probe;
+	bool f_use_stable_cwnd_update;
 };
 
 struct probe_data {
@@ -110,12 +125,12 @@ enum cwnd_event {
 	RPROBE_REFILL,
 };
 
-
 struct ndd_data {
 	struct param_data* p_params;
 
 	u32 id;
 	u64 last_log_time_us;
+	enum log_level log_level;
 
 	// State variables
 	u32 s_min_rtprop_us;
@@ -163,6 +178,10 @@ static void init_params(struct ndd_data* ndd)
 	p->p_slots_per_round =
 		(p->p_slot_load_factor_unit * p->p_ub_flow_count) >> P_SCALE;
 	p->p_rprobe_interval_us = static_p_rprobe_interval_us;
+
+	p->f_use_rtprop_probe = static_f_use_rtprop_probe;
+	p->f_wait_rtt_after_probe = static_f_wait_rtt_after_probe;
+	p->f_use_stable_cwnd_update = static_f_use_stable_cwnd_update;
 }
 
 static void reset_round_state(struct ndd_data *ndd)
@@ -219,6 +238,38 @@ static void reset_rprobe_state(struct ndd_data *ndd,
 	ndd->s_rprobe->s_rprobe_prev_cwnd_pkts = 0;
 }
 
+static u64 get_last_snd_seq(struct tcp_sock *tsk)
+{
+	// return tsk->segs_out;
+	return tsk->snd_nxt;
+}
+
+static u64 get_last_rcv_seq(struct tcp_sock *tsk)
+{
+	// return tsk->segs_in;
+	return tsk->snd_una;
+}
+
+void my_log(struct ndd_data *ndd, struct tcp_sock *tsk, u32 rtt_us, u64 now_us,
+	    enum log_level level, const char *log_type, const char *fmt, ...)
+{
+#ifdef NDD_LOG
+	va_list args;
+
+	if (level > ndd->log_level) {
+		return;
+	}
+
+	va_start(args, fmt);
+	printk(KERN_INFO "ndd %s flow %u now %llu cwnd %u rtt %u mss %u "
+			 "inflight %u last_snd_seq %llu last_rcv_seq %llu ",
+	       log_type, ndd->id, now_us, tsk->snd_cwnd, rtt_us, tsk->mss_cache,
+	       tsk->packets_out, get_last_snd_seq(tsk), get_last_rcv_seq(tsk));
+	vprintk(fmt, args);
+	va_end(args);
+#endif
+}
+
 static void ndd_init(struct sock *sk)
 {
 	struct ndd_data *ndd = inet_csk_ca(sk);
@@ -239,6 +290,7 @@ static void ndd_init(struct sock *sk)
 	++id;
 	ndd->id = id;
 	ndd->last_log_time_us = 0;
+	ndd->log_level = static_log_level;
 
 	// TODO: we should reset this at some time to accommodate path changes.
 	ndd->s_min_rtprop_us = U32_MAX;
@@ -265,18 +317,6 @@ static u32 ndd_get_mss(struct tcp_sock *tsk)
 static bool ndd_valid(struct ndd_data *ndd)
 {
 	return (ndd);
-}
-
-static u64 get_last_snd_seq(struct tcp_sock *tsk)
-{
-	// return tsk->segs_out;
-	return tsk->snd_nxt;
-}
-
-static u64 get_last_rcv_seq(struct tcp_sock *tsk)
-{
-	// return tsk->segs_in;
-	return tsk->snd_una;
 }
 
 static bool part_of_probe(struct ndd_data *ndd, struct tcp_sock *tsk)
@@ -369,10 +409,10 @@ static bool cruise_ended(struct ndd_data *ndd, u64 now_us)
 	u64 slot_end_us;
 	u64 slot_duration_us = 3 * ndd->s_slot_max_qdel_us +
 			       2 * p->p_ub_rtprop_us + p->p_probe_duration_us;
-#ifndef WAIT_RTT_AFTER_PROBE
-	slot_duration_us = 2 * ndd->s_slot_max_qdel_us + p->p_ub_rtprop_us +
-			   p->p_probe_duration_us;
-#endif
+	if (!p->f_wait_rtt_after_probe) {
+		slot_duration_us = 2 * ndd->s_slot_max_qdel_us +
+				   p->p_ub_rtprop_us + p->p_probe_duration_us;
+	}
 	slot_end_us = ndd->s_slot_start_time_us + slot_duration_us;
 	return time_after64(now_us, slot_end_us);
 }
@@ -432,7 +472,7 @@ static u32 get_probe_excess(struct ndd_data *ndd)
 void log_cwnd(enum cwnd_event reason, struct sock *sk, struct ndd_data *ndd,
 	struct tcp_sock *tsk, u32 rtt_us, u64 now_us)
 {
-#ifdef NDD_INFO
+#ifdef NDD_LOG
   printk(KERN_INFO
 	 "ndd cwnd_event flow %u reason %u now %llu cwnd %u pacing %lu rtt %u mss %u "
 	 "min_rtprop %u round_min_rtt %u round_max_rate %u "
@@ -452,7 +492,7 @@ void log_cwnd(enum cwnd_event reason, struct sock *sk, struct ndd_data *ndd,
 static void log_probe_start(struct sock *sk, struct ndd_data *ndd,
 			    struct tcp_sock *tsk, u32 rtt_us, u64 now_us)
 {
-#ifdef NDD_INFO
+#ifdef NDD_LOG
 	printk(KERN_INFO
 	       "ndd probe_start flow %u now %llu cwnd %u pacing %lu rtt %u mss %u "
 	       "min_rtt %u min_excess_delay %u "
@@ -529,10 +569,11 @@ static void update_probe_state(struct ndd_data *ndd, struct tcp_sock *tsk,
 		// Alternatively, we can just check inflight = cwnd.
 		if (after(last_rcv_seq, ndd->s_probe->s_probe_start_seq)) {
 			ndd->s_probe->s_probe_inflightmatch_seq = last_snd_seq;
-#ifndef WAIT_RTT_AFTER_PROBE
-			ndd->s_probe->s_probe_first_seq = last_snd_seq;
-			ndd->s_probe->s_probe_first_seq_snd_time = now_us;
-#endif
+			if (!p->f_wait_rtt_after_probe) {
+				ndd->s_probe->s_probe_first_seq = last_snd_seq;
+				ndd->s_probe->s_probe_first_seq_snd_time =
+					now_us;
+			}
 #ifdef NDD_DEBUG
 			printk(KERN_INFO
 			       "ndd probe_inflightmatch flow %u "
@@ -577,7 +618,7 @@ static void log_cwnd_update(struct sock *sk, struct ndd_data *ndd,
 			    u64 target_flow_count_unit, u64 target_cwnd_unit,
 			    u64 next_cwnd_unit, u64 now_us)
 {
-#ifdef NDD_INFO
+#ifdef NDD_LOG
 	printk(KERN_INFO
 	       "ndd cwnd_update flow %u now %llu cwnd %u pacing %lu rtt %u mss %u "
 	       "unit %u min_rtt_before %u min_rtt_after %u "
@@ -601,7 +642,7 @@ static void log_cwnd_update(struct sock *sk, struct ndd_data *ndd,
 static void log_slot_end(struct sock *sk, struct ndd_data *ndd,
 			 struct tcp_sock *tsk, u32 rtt_us, u64 now_us)
 {
-#ifdef NDD_INFO
+#ifdef NDD_LOG
 	u32 slot_duration_us =
 		tcp_stamp_us_delta(now_us, ndd->s_slot_start_time_us);
 	printk(KERN_INFO
@@ -632,6 +673,8 @@ static void update_cwnd(struct sock *sk, struct ndd_data *ndd,
 	u32 next_cwnd;
 	u64 tcwnd_hi_clamp_unit = tsk->snd_cwnd * p->p_cwnd_clamp_hi_unit;
 	u64 tcwnd_lo_clamp_unit = tsk->snd_cwnd * p->p_cwnd_clamp_lo_unit;
+	u64 tcwnd_num;
+	u64 tcwnd_den;
 
 	bw_estimate_pps = U64_MAX;
 	if (ndd->s_probe->s_probe_min_excess_delay_us > 0) {
@@ -661,9 +704,25 @@ static void update_cwnd(struct sock *sk, struct ndd_data *ndd,
 	if (target_flow_count_unit == 0) {
 		target_cwnd_unit = tsk->snd_cwnd * p->p_cwnd_clamp_hi_unit;
 	} else {
-		target_cwnd_unit = tsk->snd_cwnd << P_SCALE;
-		target_cwnd_unit *= flow_count_belief_unit;
-		do_div(target_cwnd_unit, target_flow_count_unit);
+		if (p->f_use_stable_cwnd_update) {
+			target_cwnd_unit = tsk->snd_cwnd << P_SCALE;
+			tcwnd_num = (ndd->s_min_rtprop_us << P_SCALE) +
+				    p->p_contract_min_qdel_us *
+					    flow_count_belief_unit;
+			tcwnd_den = (ndd->s_min_rtprop_us << P_SCALE) +
+				    p->p_contract_min_qdel_us *
+					    target_flow_count_unit;
+			target_cwnd_unit *= tcwnd_num;
+			do_div(target_cwnd_unit, tcwnd_den);
+			// TODO: should we convert to unit after, given there
+			// is already scaling due to num, and den being in us?
+			// Will unit^2 overflow?
+			// target_cwnd_unit = target_cwnd_unit << P_SCALE;
+		} else {
+			target_cwnd_unit = tsk->snd_cwnd << P_SCALE;
+			target_cwnd_unit *= flow_count_belief_unit;
+			do_div(target_cwnd_unit, target_flow_count_unit);
+		}
 	}
 	target_cwnd_unit = max_t(u64, target_cwnd_unit, tcwnd_lo_clamp_unit);
 	target_cwnd_unit = min_t(u64, target_cwnd_unit, tcwnd_hi_clamp_unit);
@@ -696,7 +755,7 @@ static void log_periodic(struct sock *sk, struct ndd_data *ndd,
 		return;
 	}
 	ndd->last_log_time_us = now_us;
-#ifdef NDD_INFO
+#ifdef NDD_LOG
 	printk(KERN_INFO
 	       "ndd periodic flow %u now %llu cwnd %u pacing %lu rtt %u mss %u "
 	       "min_rtprop %u round_min_rtt %u round_max_rate %u "
@@ -855,6 +914,7 @@ static void on_ack(struct sock *sk, const struct rate_sample *rs)
 {
 	struct ndd_data *ndd = inet_csk_ca(sk);
 	struct tcp_sock *tsk = tcp_sk(sk);
+	struct param_data* p = ndd->p_params;
 	u32 rtt_us;
 	u64 now_us = tsk->tcp_mstamp;
 	// u32 latest_inflight_segments = rs->prior_in_flight;
@@ -873,12 +933,11 @@ static void on_ack(struct sock *sk, const struct rate_sample *rs)
 
 	log_periodic(sk, ndd, tsk, rtt_us, now_us);
 
-#ifdef USE_RTPROP_PROBE
-	if (should_rprobe(ndd, now_us) || ndd->s_rprobe->s_rprobe_ongoing) {
+	if (p->f_use_rtprop_probe &&
+	    (should_rprobe(ndd, now_us) || ndd->s_rprobe->s_rprobe_ongoing)) {
 		rprobe(sk, ndd, tsk, rtt_us, now_us);
 		return;
 	}
-#endif
 
 	if (!ndd->s_ss_done) {
 		slow_start(sk, tsk, ndd, now_us, rtt_us);
@@ -951,7 +1010,7 @@ static struct tcp_congestion_ops tcp_ndd_cong_ops __read_mostly = {
 static int __init ndd_register(void)
 {
 	BUILD_BUG_ON(sizeof(struct ndd_data) > ICSK_CA_PRIV_SIZE);
-#ifdef NDD_INFO
+#ifdef NDD_LOG
 	printk(KERN_INFO "ndd module_install ");
 #endif
 	return tcp_register_congestion_control(&tcp_ndd_cong_ops);
