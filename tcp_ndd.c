@@ -3,6 +3,8 @@ NDD: A provably fair and robust congestion controller
 */
 
 #include <net/tcp.h>
+#include <linux/module.h>
+#include <linux/moduleparam.h>
 
 // #define NDD_DEBUG_VERBOSE
 // #define NDD_DEBUG
@@ -15,32 +17,64 @@ NDD: A provably fair and robust congestion controller
 #define P_UNIT (1 << P_SCALE)
 
 // Assumptions about network scenarios
-static const u32 p_ub_rtprop_us = 10000; // 10 ms
-static const u32 p_ub_rtterr_us = 10000; // 10 ms
-static const u32 p_ub_flow_count = 5;
+static u32 static_p_ub_rtprop_us = 10000; // 10 ms
+static u32 static_p_ub_rtterr_us = 10000; // 10 ms
+static u32 static_p_ub_flow_count = 5;
 
 // Design parameters
 // TODO: check if these floating values make sense given the UNIT. Should we
 // change the unit?
-static const u32 p_lb_cwnd_pkts = 4;
+static u32 static_p_lb_cwnd_pkts = 4;
 // ^^ this should be such that, p_cwnd_clamp_hi increases this by at least 1,
 // otherwise even at the maximum increase, the cwnd will not increase due to
 // integer arithmetic.
-static const u32 p_contract_min_qdel_us = p_ub_rtprop_us / 2;
-// for stability p_contract_min_qdel_us >= rtprop / ground_truth_flow_count,
-// for error, we need p_contract_min_qdel_us >= 2 * p_ub_rtterr_us
-static const u32 p_probe_duration_us = 10000; // 10 ms. How should this be set?
-static const u32 p_probe_multiplier_unit = P_UNIT * 4;
-static const u32 p_cwnd_averaging_factor_unit = P_UNIT * 1 / 2;
-static const u32 p_inv_cwnd_averaging_factor_unit = P_UNIT * 1 - p_cwnd_averaging_factor_unit;
-static const u32 p_cwnd_clamp_hi_unit = P_UNIT * 13 / 10;
-static const u32 p_cwnd_clamp_lo_unit = P_UNIT * 10 / 13;
-static const u32 p_slot_load_factor_unit = P_UNIT * 2;
-static const u32 p_slots_per_round =
-	(p_slot_load_factor_unit * p_ub_flow_count) >> P_SCALE;
-static const u32 p_rprobe_interval_us = 30000000; // 30 seconds
+static u32 static_p_contract_min_qdel_us = 5000; // static_p_ub_rtprop_us / 2;
+// for stability, static_p_contract_min_qdel_us >= rtprop / ground_truth_flow_count,
+// for error, we need static_p_contract_min_qdel_us >= 2 * static_p_ub_rtterr_us
+static u32 static_p_probe_duration_us = 10000; // 10 ms. How should this be set?
+static u32 static_p_probe_multiplier_unit = P_UNIT * 4;
+static u32 static_p_cwnd_averaging_factor_unit = P_UNIT * 1 / 2;
+static u32 static_p_cwnd_clamp_hi_unit = P_UNIT * 13 / 10;
+static u32 static_p_cwnd_clamp_lo_unit = P_UNIT * 10 / 13;
+static u32 static_p_slot_load_factor_unit = P_UNIT * 2;
+static u32 static_p_rprobe_interval_us = 30000000; // 30 seconds
+
+// Make all parameters runtime configurable
+// https://devarea.com/linux-kernel-development-kernel-module-parameters/
+module_param(static_p_ub_rtprop_us, uint, 0660);
+module_param(static_p_ub_rtterr_us, uint, 0660);
+module_param(static_p_ub_flow_count, uint, 0660);
+module_param(static_p_lb_cwnd_pkts, uint, 0660);
+module_param(static_p_contract_min_qdel_us, uint, 0660);
+module_param(static_p_probe_duration_us, uint, 0660);
+module_param(static_p_probe_multiplier_unit, uint, 0660);
+module_param(static_p_cwnd_averaging_factor_unit, uint, 0660);
+module_param(static_p_cwnd_clamp_hi_unit, uint, 0660);
+module_param(static_p_cwnd_clamp_lo_unit, uint, 0660);
+module_param(static_p_slot_load_factor_unit, uint, 0660);
+module_param(static_p_rprobe_interval_us, uint, 0660);
 
 static u32 id = 0;
+
+struct param_data {
+	// Priors about network
+	u32 p_ub_rtprop_us;
+	u32 p_ub_rtterr_us;
+	u32 p_ub_flow_count;
+
+	// Design parameters
+	u32 p_lb_cwnd_pkts;
+	u32 p_contract_min_qdel_us;
+	u32 p_probe_duration_us;
+	u32 p_probe_multiplier_unit;
+	u32 p_cwnd_averaging_factor_unit;
+	u32 p_inv_cwnd_averaging_factor_unit;
+	u32 p_cwnd_clamp_hi_unit;
+	u32 p_cwnd_clamp_lo_unit;
+	u32 p_slot_load_factor_unit;
+	u32 p_slots_per_round;
+	u32 p_rprobe_interval_us;
+};
 
 struct probe_data {
 	bool s_probe_ongoing;
@@ -66,7 +100,20 @@ struct rprobe_data {
 	bool s_rprobe_end_initiated;
 };
 
+enum cwnd_event {
+	SLOW_START,
+	SLOW_START_END,
+	PROBE_GAIN,
+	PROBE_DRAIN,
+	PROBE_UPDATE,
+	RPROBE_DRAIN,
+	RPROBE_REFILL,
+};
+
+
 struct ndd_data {
+	struct param_data* p_params;
+
 	u32 id;
 	u64 last_log_time_us;
 
@@ -95,48 +142,46 @@ struct ndd_data {
 	struct rprobe_data *s_rprobe;
 };
 
-enum cwnd_event {
-	SLOW_START,
-	SLOW_START_END,
-	PROBE_GAIN,
-	PROBE_DRAIN,
-	PROBE_UPDATE,
-	RPROBE_DRAIN,
-	RPROBE_REFILL,
-};
 
-static void ndd_init(struct sock *sk)
+static void init_params(struct ndd_data* ndd)
 {
-	struct ndd_data *ndd = inet_csk_ca(sk);
-	++id;
-	ndd->id = id;
-	ndd->last_log_time_us = 0;
+	struct param_data* p = ndd->p_params;
+	p->p_ub_rtprop_us = static_p_ub_rtprop_us;
+	p->p_ub_rtterr_us = static_p_ub_rtterr_us;
+	p->p_ub_flow_count = static_p_ub_flow_count;
 
-	ndd->s_min_rtprop_us = U32_MAX;
-	// TODO: we should reset this at some time to accommodate path changes.
+	p->p_lb_cwnd_pkts = static_p_lb_cwnd_pkts;
+	p->p_contract_min_qdel_us = static_p_contract_min_qdel_us;
+	p->p_probe_duration_us = static_p_probe_duration_us;
+	p->p_probe_multiplier_unit = static_p_probe_multiplier_unit;
+	p->p_cwnd_averaging_factor_unit = static_p_cwnd_averaging_factor_unit;
+	p->p_inv_cwnd_averaging_factor_unit =
+		P_UNIT * 1 - p->p_cwnd_averaging_factor_unit;
+	p->p_cwnd_clamp_hi_unit = static_p_cwnd_clamp_hi_unit;
+	p->p_cwnd_clamp_lo_unit = static_p_cwnd_clamp_lo_unit;
+	p->p_slot_load_factor_unit = static_p_slot_load_factor_unit;
+	p->p_slots_per_round =
+		(p->p_slot_load_factor_unit * p->p_ub_flow_count) >> P_SCALE;
+	p->p_rprobe_interval_us = static_p_rprobe_interval_us;
+}
 
-	ndd->s_ss_done = false;
-	ndd->s_ss_end_initiated = false;
-	ndd->s_ss_last_seq = 0;
-
+static void reset_round_state(struct ndd_data *ndd)
+{
+	struct param_data* p = ndd->p_params;
 	ndd->s_round_slots_till_now = 0;
 	ndd->s_round_min_rtt_us = U32_MAX;
 	ndd->s_round_max_rate_pps = 0;
-	ndd->s_round_probe_slot_idx = 1 + prandom_u32_max(p_slots_per_round);
+	ndd->s_round_probe_slot_idx = 1 + prandom_u32_max(p->p_slots_per_round);
 	ndd->s_round_probed = false;
+}
 
-	ndd->s_slot_max_qdel_us = 0;
-	ndd->s_slot_start_time_us = 0;
-	ndd->s_slot_max_rate_pps = 0;
-	ndd->s_slot_min_rtt_us = U32_MAX;
-	ndd->s_slot_max_rtt_us = 0;
-
-	ndd->s_probe = kzalloc(sizeof(struct probe_data), GFP_KERNEL);
+static void reset_probe_state(struct ndd_data *ndd)
+{
 	ndd->s_probe->s_probe_ongoing = false;
-	ndd->s_probe->s_probe_min_excess_delay_us = U32_MAX;
 	ndd->s_probe->s_probe_min_rtt_us = U32_MAX;
-	ndd->s_probe->s_probe_prev_cwnd_pkts = 0;
-	ndd->s_probe->s_probe_excess_pkts = 0;
+	ndd->s_probe->s_probe_min_excess_delay_us = U32_MAX;
+	ndd->s_probe->s_probe_prev_cwnd_pkts = 0; // should not be read anyway.
+	ndd->s_probe->s_probe_excess_pkts = 0; // should not be read anyway.
 	ndd->s_probe->s_probe_end_initiated = false;
 
 	ndd->s_probe->s_probe_start_seq = 0;
@@ -144,14 +189,68 @@ static void ndd_init(struct sock *sk)
 	ndd->s_probe->s_probe_first_seq = 0;
 	ndd->s_probe->s_probe_last_seq = 0;
 	ndd->s_probe->s_probe_first_seq_snd_time = 0;
+}
 
-	ndd->s_rprobe = kzalloc(sizeof(struct rprobe_data), GFP_KERNEL);
+static void start_new_slot(struct ndd_data *ndd, u64 now_us)
+{
+	ndd->s_slot_max_qdel_us = 0;
+	ndd->s_slot_start_time_us = now_us;
+	ndd->s_slot_max_rate_pps = 0;
+	ndd->s_slot_min_rtt_us = U32_MAX;
+	ndd->s_slot_max_rtt_us = 0;
+}
+
+static u64 get_rprobe_time(struct ndd_data* ndd, u64 time_us)
+{
+	// Round down to the nearest multiple of rprobe_interval_us
+	struct param_data* p = ndd->p_params;
+	return (time_us / p->p_rprobe_interval_us) * p->p_rprobe_interval_us;
+}
+
+static void reset_rprobe_state(struct ndd_data *ndd,
+			       u64 current_rprobe_start_time_us)
+{
 	ndd->s_rprobe->s_rprobe_ongoing = false;
-	ndd->s_rprobe->s_rprobe_prev_start_time_us = 0;
+	ndd->s_rprobe->s_rprobe_prev_start_time_us =
+		get_rprobe_time(ndd, current_rprobe_start_time_us);
 	ndd->s_rprobe->s_rprobe_start_time_us = 0;
 	ndd->s_rprobe->s_rprobe_init_end_time_us = 0;
-	ndd->s_rprobe->s_rprobe_prev_cwnd_pkts = 0;
 	ndd->s_rprobe->s_rprobe_end_initiated = false;
+	ndd->s_rprobe->s_rprobe_prev_cwnd_pkts = 0;
+}
+
+static void ndd_init(struct sock *sk)
+{
+	struct ndd_data *ndd = inet_csk_ca(sk);
+	struct tcp_sock *tsk = tcp_sk(sk);
+	u64 now_us = tsk->tcp_mstamp;
+
+	ndd->s_probe = kzalloc(sizeof(struct probe_data), GFP_KERNEL);
+	ndd->s_rprobe = kzalloc(sizeof(struct rprobe_data), GFP_KERNEL);
+	ndd->p_params = kzalloc(sizeof(struct param_data), GFP_KERNEL);
+
+	// Convention, the order in struct is same as order of initialization
+	// so that we ensure everything is initialized and in the right order.
+
+	// param initialization should be first as these are used in other
+	// initializations, for others, the order does not matter much.
+	init_params(ndd);
+
+	++id;
+	ndd->id = id;
+	ndd->last_log_time_us = 0;
+
+	// TODO: we should reset this at some time to accommodate path changes.
+	ndd->s_min_rtprop_us = U32_MAX;
+
+	ndd->s_ss_done = false;
+	ndd->s_ss_end_initiated = false;
+	ndd->s_ss_last_seq = 0;
+
+	reset_round_state(ndd);
+	start_new_slot(ndd, now_us);
+	reset_probe_state(ndd);
+	reset_rprobe_state(ndd, now_us);
 
 	cmpxchg(&sk->sk_pacing_status, SK_PACING_NONE, SK_PACING_NEEDED);
 }
@@ -254,15 +353,6 @@ static void update_estimates(struct ndd_data *ndd, struct tcp_sock *tsk,
 	ndd->s_slot_min_rtt_us = min_t(u32, ndd->s_slot_min_rtt_us, rtt_us);
 }
 
-static void reset_round_state(struct ndd_data *ndd)
-{
-	ndd->s_round_slots_till_now = 0;
-	ndd->s_round_min_rtt_us = U32_MAX;
-	ndd->s_round_max_rate_pps = 0;
-	ndd->s_round_probe_slot_idx = 1 + prandom_u32_max(p_slots_per_round);
-	ndd->s_round_probed = false;
-}
-
 static bool probe_ended(struct ndd_data *ndd, struct tcp_sock *tsk)
 {
 	u64 last_rcv_seq = get_last_rcv_seq(tsk);
@@ -272,15 +362,16 @@ static bool probe_ended(struct ndd_data *ndd, struct tcp_sock *tsk)
 
 static bool cruise_ended(struct ndd_data *ndd, u64 now_us)
 {
+	struct param_data* p = ndd->p_params;
 	// Super conservative
 	// u64 slot_duration_us = 3 * (ndd->s_slot_max_qdel_us +
-	// p_ub_rtprop_us) + p_probe_duration_us;
+	// p->p_ub_rtprop_us) + p->p_probe_duration_us;
 	u64 slot_end_us;
 	u64 slot_duration_us = 3 * ndd->s_slot_max_qdel_us +
-			       2 * p_ub_rtprop_us + p_probe_duration_us;
+			       2 * p->p_ub_rtprop_us + p->p_probe_duration_us;
 #ifndef WAIT_RTT_AFTER_PROBE
-	slot_duration_us = 2 * ndd->s_slot_max_qdel_us + p_ub_rtprop_us +
-			   p_probe_duration_us;
+	slot_duration_us = 2 * ndd->s_slot_max_qdel_us + p->p_ub_rtprop_us +
+			   p->p_probe_duration_us;
 #endif
 	slot_end_us = ndd->s_slot_start_time_us + slot_duration_us;
 	return time_after64(now_us, slot_end_us);
@@ -294,18 +385,10 @@ static bool should_init_probe_end(struct ndd_data *ndd, struct tcp_sock *tsk)
 	       !ndd->s_probe->s_probe_end_initiated;
 }
 
-static u64 get_slots_per_round(void)
-{
-	u64 slots_per_round;
-	slots_per_round = p_ub_flow_count;
-	slots_per_round *= p_slot_load_factor_unit;
-	slots_per_round <<= P_SCALE;
-	return slots_per_round;
-}
-
 static bool round_ended(struct ndd_data *ndd, struct tcp_sock *tsk)
 {
-	return ndd->s_round_slots_till_now >= p_slots_per_round;
+	struct param_data* p = ndd->p_params;
+	return ndd->s_round_slots_till_now >= p->p_slots_per_round;
 }
 
 static bool should_probe(struct ndd_data *ndd)
@@ -313,46 +396,32 @@ static bool should_probe(struct ndd_data *ndd)
 	return ndd->s_round_slots_till_now >= ndd->s_round_probe_slot_idx;
 }
 
-static void reset_probe_state(struct ndd_data *ndd)
-{
-	ndd->s_probe->s_probe_ongoing = false;
-	ndd->s_probe->s_probe_min_rtt_us = U32_MAX;
-	ndd->s_probe->s_probe_min_excess_delay_us = U32_MAX;
-	ndd->s_probe->s_probe_prev_cwnd_pkts = 0; // should not be read anyway.
-	ndd->s_probe->s_probe_excess_pkts = 0; // should not be read anyway.
-	ndd->s_probe->s_probe_end_initiated = false;
-
-	ndd->s_probe->s_probe_start_seq = 0;
-	ndd->s_probe->s_probe_inflightmatch_seq = 0;
-	ndd->s_probe->s_probe_first_seq = 0;
-	ndd->s_probe->s_probe_last_seq = 0;
-	ndd->s_probe->s_probe_first_seq_snd_time = 0;
-}
-
 static u32 get_target_flow_count_unit(struct ndd_data *ndd)
 {
+	struct param_data* p = ndd->p_params;
 	u32 round_qdel_us;
 	u32 target_flow_count_unit;
 
 	round_qdel_us = ndd->s_round_min_rtt_us - ndd->s_min_rtprop_us;
 	target_flow_count_unit = P_UNIT;
 	target_flow_count_unit *= round_qdel_us;
-	do_div(target_flow_count_unit, p_contract_min_qdel_us);
+	do_div(target_flow_count_unit, p->p_contract_min_qdel_us);
 
 	return target_flow_count_unit;
 }
 
 static u32 get_probe_excess(struct ndd_data *ndd)
 {
+	struct param_data* p = ndd->p_params;
 	u32 target_flow_count_unit;
 	u64 excess_pkts;
 
 	target_flow_count_unit = get_target_flow_count_unit(ndd);
-	excess_pkts = p_probe_multiplier_unit;
+	excess_pkts = p->p_probe_multiplier_unit;
 	excess_pkts *= target_flow_count_unit;
 	excess_pkts >>= P_SCALE;
 	excess_pkts *= ndd->s_round_max_rate_pps;
-	excess_pkts *= p_ub_rtterr_us;
+	excess_pkts *= p->p_ub_rtterr_us;
 	excess_pkts >>= P_SCALE;
 	excess_pkts = DIV_ROUND_UP_ULL(excess_pkts, USEC_PER_SEC);
 	excess_pkts = max_t(u64, excess_pkts, 1);
@@ -418,15 +487,6 @@ static void start_probe(struct sock *sk, struct ndd_data *ndd,
 	log_cwnd(PROBE_GAIN, sk, ndd, tsk, rtt_us, now_us);
 }
 
-static void start_new_slot(struct ndd_data *ndd, u64 now_us)
-{
-	ndd->s_slot_max_qdel_us = 0;
-	ndd->s_slot_start_time_us = now_us;
-	ndd->s_slot_max_rate_pps = 0;
-	ndd->s_slot_min_rtt_us = U32_MAX;
-	ndd->s_slot_max_rtt_us = 0;
-}
-
 static void update_probe_state(struct ndd_data *ndd, struct tcp_sock *tsk,
 			       const struct rate_sample *rs, u32 rtt_us, u64 now_us)
 {
@@ -438,6 +498,7 @@ static void update_probe_state(struct ndd_data *ndd, struct tcp_sock *tsk,
 	// tight interpretation) for flows with different propagation delays.
 	// How might that affect things? We can just pad time if probe has
 	// ended but slot has not.
+	struct param_data* p = ndd->p_params;
 	u64 last_rcv_seq;
 	u64 last_snd_seq;
 	u64 end_seq_snd_time;
@@ -496,7 +557,7 @@ static void update_probe_state(struct ndd_data *ndd, struct tcp_sock *tsk,
 		}
 	} else if (ndd->s_probe->s_probe_last_seq == 0) {
 		end_seq_snd_time = ndd->s_probe->s_probe_first_seq_snd_time +
-				   p_probe_duration_us;
+				   p->p_probe_duration_us;
 		if (time_after64(now_us, end_seq_snd_time)) {
 			ndd->s_probe->s_probe_last_seq = last_snd_seq;
 #ifdef NDD_DEBUG
@@ -562,14 +623,15 @@ static void log_slot_end(struct sock *sk, struct ndd_data *ndd,
 static void update_cwnd(struct sock *sk, struct ndd_data *ndd,
 			struct tcp_sock *tsk, u32 rtt_us, u64 now_us)
 {
+	struct param_data* p = ndd->p_params;
 	u64 bw_estimate_pps;
 	u64 flow_count_belief_unit;
 	u64 target_flow_count_unit;
 	u64 target_cwnd_unit;
 	u64 next_cwnd_unit;
 	u32 next_cwnd;
-	u64 tcwnd_hi_clamp_unit = tsk->snd_cwnd * p_cwnd_clamp_hi_unit;
-	u64 tcwnd_lo_clamp_unit = tsk->snd_cwnd * p_cwnd_clamp_lo_unit;
+	u64 tcwnd_hi_clamp_unit = tsk->snd_cwnd * p->p_cwnd_clamp_hi_unit;
+	u64 tcwnd_lo_clamp_unit = tsk->snd_cwnd * p->p_cwnd_clamp_lo_unit;
 
 	bw_estimate_pps = U64_MAX;
 	if (ndd->s_probe->s_probe_min_excess_delay_us > 0) {
@@ -578,7 +640,7 @@ static void update_cwnd(struct sock *sk, struct ndd_data *ndd,
 		do_div(bw_estimate_pps, ndd->s_probe->s_probe_min_excess_delay_us);
 	}
 
-	flow_count_belief_unit = p_ub_flow_count << P_SCALE;
+	flow_count_belief_unit = p->p_ub_flow_count << P_SCALE;
 	if (ndd->s_round_max_rate_pps > 0) {
 		flow_count_belief_unit = P_UNIT;
 		flow_count_belief_unit *= bw_estimate_pps;
@@ -586,7 +648,7 @@ static void update_cwnd(struct sock *sk, struct ndd_data *ndd,
 	}
 	// TODO: is this needed? we clamp flow_count_belief anyway.
 	// flow_count_belief_unit = min_t(u64, flow_count_belief_unit,
-	// p_ub_flow_count << P_SCALE);
+	// p->p_ub_flow_count << P_SCALE);
 	flow_count_belief_unit = max_t(u64, flow_count_belief_unit, P_UNIT);
 
 	target_flow_count_unit = get_target_flow_count_unit(ndd);
@@ -597,7 +659,7 @@ static void update_cwnd(struct sock *sk, struct ndd_data *ndd,
 	// be same as target_flow_count_unit). We expect cwnd to be large so
 	// that the clamp times cwnd is a different value.
 	if (target_flow_count_unit == 0) {
-		target_cwnd_unit = tsk->snd_cwnd * p_cwnd_clamp_hi_unit;
+		target_cwnd_unit = tsk->snd_cwnd * p->p_cwnd_clamp_hi_unit;
 	} else {
 		target_cwnd_unit = tsk->snd_cwnd << P_SCALE;
 		target_cwnd_unit *= flow_count_belief_unit;
@@ -607,17 +669,17 @@ static void update_cwnd(struct sock *sk, struct ndd_data *ndd,
 	target_cwnd_unit = min_t(u64, target_cwnd_unit, tcwnd_hi_clamp_unit);
 
 	next_cwnd_unit =
-		p_inv_cwnd_averaging_factor_unit * tsk->snd_cwnd +
-		((p_cwnd_averaging_factor_unit * target_cwnd_unit) >> P_SCALE);
+		p->p_inv_cwnd_averaging_factor_unit * tsk->snd_cwnd +
+		((p->p_cwnd_averaging_factor_unit * target_cwnd_unit) >> P_SCALE);
 #ifdef NDD_DEBUG
 	printk(KERN_INFO
 	       "ndd cwnd_update_debug flow %u alpha %u 1-alpha %u cwnd %u target_cwnd %llu next_cwnd %llu ",
-	       ndd->id, p_cwnd_averaging_factor_unit,
-	       p_inv_cwnd_averaging_factor_unit, tsk->snd_cwnd,
+	       ndd->id, p->p_cwnd_averaging_factor_unit,
+	       p->p_inv_cwnd_averaging_factor_unit, tsk->snd_cwnd,
 	       target_cwnd_unit, next_cwnd_unit);
 #endif
 	next_cwnd = DIV_ROUND_UP_ULL(next_cwnd_unit, P_UNIT);
-	next_cwnd = max_t(u32, next_cwnd, p_lb_cwnd_pkts);
+	next_cwnd = max_t(u32, next_cwnd, p->p_lb_cwnd_pkts);
 	tsk->snd_cwnd = next_cwnd;
 	update_pacing_rate(sk, tsk, rtt_us);
 
@@ -676,11 +738,14 @@ static void slow_start(struct sock *sk, struct tcp_sock *tsk,
 	// will continue to increase, we want to reset slot and round estimates
 	// when we expect the rtt to stop increasing.
 
+	struct param_data *p = ndd->p_params;
 	u64 last_recv_seq = get_last_rcv_seq(tsk);
 	u64 last_snd_seq = get_last_snd_seq(tsk);
-	bool should_init_ss_end = rtt_us > ndd->s_min_rtprop_us +
-						   p_contract_min_qdel_us +
-						   p_ub_rtterr_us;
+	bool should_init_ss_end =
+		rtt_us > (ndd->s_min_rtprop_us + p->p_contract_min_qdel_us +
+			  p->p_ub_rtterr_us);
+	// TODO: contract_const subsumes rtt_err, so should we really add that
+	// here?
 	bool ss_ended = ndd->s_ss_last_seq > 0 &&
 			after(last_recv_seq, ndd->s_ss_last_seq);
 
@@ -694,7 +759,7 @@ static void slow_start(struct sock *sk, struct tcp_sock *tsk,
 			// half of waht it is now, so we revert back to that
 			// cwnd.
 			tsk->snd_cwnd = tsk->snd_cwnd / 2;
-			tsk->snd_cwnd = max_t(u32, tsk->snd_cwnd, p_lb_cwnd_pkts);
+			tsk->snd_cwnd = max_t(u32, tsk->snd_cwnd, p->p_lb_cwnd_pkts);
 			update_pacing_rate(sk, tsk, rtt_us);
 			log_cwnd(SLOW_START_END, sk, ndd, tsk, rtt_us, now_us);
 			ndd->s_ss_end_initiated = true;
@@ -711,16 +776,12 @@ static void slow_start(struct sock *sk, struct tcp_sock *tsk,
 	}
 }
 
-static u64 get_rprobe_time(u64 time_us)
-{
-	return (time_us / p_rprobe_interval_us) * p_rprobe_interval_us;
-}
-
 static bool should_rprobe(struct ndd_data *ndd, u64 now_us)
 {
-	return tcp_stamp_us_delta(now_us,
-				  ndd->s_rprobe->s_rprobe_prev_start_time_us) >
-	       p_rprobe_interval_us;
+	struct param_data *p = ndd->p_params;
+	return (tcp_stamp_us_delta(
+		       now_us, ndd->s_rprobe->s_rprobe_prev_start_time_us)) >
+	       p->p_rprobe_interval_us;
 }
 
 static void rprobe(struct sock *sk, struct ndd_data *ndd, struct tcp_sock *tsk,
@@ -728,7 +789,8 @@ static void rprobe(struct sock *sk, struct ndd_data *ndd, struct tcp_sock *tsk,
 {
 	// Note, these values only make sense when the boolean conditions they
 	// are used in are met.
-	u64 rprobe_duration_us = ndd->s_slot_max_qdel_us + p_ub_rtprop_us;
+	struct param_data* p = ndd->p_params;
+	u64 rprobe_duration_us = ndd->s_slot_max_qdel_us + p->p_ub_rtprop_us;
 	u64 init_rprobe_end_us =
 		ndd->s_rprobe->s_rprobe_start_time_us + rprobe_duration_us;
 	bool should_init_rprobe_end = time_after64(now_us, init_rprobe_end_us);
@@ -743,7 +805,7 @@ static void rprobe(struct sock *sk, struct ndd_data *ndd, struct tcp_sock *tsk,
 	if (!ndd->s_rprobe->s_rprobe_ongoing) {
 		ndd->s_rprobe->s_rprobe_ongoing = true;
 		ndd->s_rprobe->s_rprobe_prev_start_time_us =
-			get_rprobe_time(now_us);
+			get_rprobe_time(ndd, now_us);
 		ndd->s_rprobe->s_rprobe_start_time_us = now_us;
 		ndd->s_rprobe->s_rprobe_init_end_time_us = 0;
 		ndd->s_rprobe->s_rprobe_prev_cwnd_pkts = tsk->snd_cwnd;
@@ -755,7 +817,7 @@ static void rprobe(struct sock *sk, struct ndd_data *ndd, struct tcp_sock *tsk,
 		}
 		ndd->s_rprobe->s_rprobe_end_initiated = false;
 
-		tsk->snd_cwnd = p_lb_cwnd_pkts;
+		tsk->snd_cwnd = p->p_lb_cwnd_pkts;
 		// update_pacing_rate(sk, tsk, rtt_us);
 		// ^^ do not update pacing rate here, as linux takes time to
 		// increase rate after decrease.
@@ -768,22 +830,13 @@ static void rprobe(struct sock *sk, struct ndd_data *ndd, struct tcp_sock *tsk,
 		if (should_init_rprobe_end) {
 			ndd->s_rprobe->s_rprobe_end_initiated = true;
 			ndd->s_rprobe->s_rprobe_init_end_time_us = now_us;
-			tsk->snd_cwnd =
-				ndd->s_rprobe->s_rprobe_prev_cwnd_pkts;
+			tsk->snd_cwnd = ndd->s_rprobe->s_rprobe_prev_cwnd_pkts;
 			update_pacing_rate(sk, tsk, rtt_us);
 			log_cwnd(RPROBE_REFILL, sk, ndd, tsk, rtt_us, now_us);
 		}
 	} else {
 		if (rprobe_ended) {
-			ndd->s_rprobe->s_rprobe_ongoing = false;
-			ndd->s_rprobe->s_rprobe_prev_start_time_us =
-				get_rprobe_time(
-					ndd->s_rprobe
-						->s_rprobe_start_time_us);
-			ndd->s_rprobe->s_rprobe_start_time_us = 0;
-			ndd->s_rprobe->s_rprobe_init_end_time_us = 0;
-			ndd->s_rprobe->s_rprobe_end_initiated = false;
-			ndd->s_rprobe->s_rprobe_prev_cwnd_pkts = 0;
+			reset_rprobe_state(ndd, ndd->s_rprobe->s_rprobe_start_time_us);
 
 			// slow start may also be ongoing, in that
 			// case, we do not touch slow start state. If
@@ -869,6 +922,7 @@ static void ndd_release(struct sock *sk)
 	struct ndd_data *ndd = inet_csk_ca(sk);
 	kfree(ndd->s_probe);
 	kfree(ndd->s_rprobe);
+	kfree(ndd->p_params);
 }
 
 static u32 ndd_ssthresh(struct sock *sk)
