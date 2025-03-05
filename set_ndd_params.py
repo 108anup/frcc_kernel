@@ -58,7 +58,7 @@ def set_kernel_param(name, value):
 
     # For boolean params, convert to 'Y' or 'N'
     if PARAMS[name] == bool:
-        value = "Y" if value.lower() in ["true", "1", "y"] else "N"
+        value = "Y" if value else "N"
 
     try:
         # Use sudo tee to write values
