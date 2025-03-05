@@ -36,8 +36,8 @@ static u32 static_p_contract_min_qdel_us = 5000; // static_p_ub_rtprop_us / 2;
 // for stability, static_p_contract_min_qdel_us >= rtprop / ground_truth_flow_count,
 // for error, we need static_p_contract_min_qdel_us >= 2 * static_p_ub_rtterr_us
 static u32 static_p_probe_duration_us = 10000; // 10 ms. How should this be set?
-static u32 static_p_probe_multiplier_unit = P_UNIT * 4;
-static u32 static_p_cwnd_averaging_factor_unit = P_UNIT * 1 / 2;
+static u32 static_p_probe_multiplier_unit = P_UNIT * 4;  // gamma in the paper
+static u32 static_p_cwnd_averaging_factor_unit = P_UNIT * 1;  // alpha = 1/2 for non-stable design, otherwise 1.
 static u32 static_p_cwnd_clamp_hi_unit = P_UNIT * 13 / 10;
 static u32 static_p_cwnd_clamp_lo_unit = P_UNIT * 10 / 13;
 static u32 static_p_slot_load_factor_unit = P_UNIT * 2;
