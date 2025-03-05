@@ -7,8 +7,8 @@ NDD: A provably fair and robust congestion controller
 #include <linux/moduleparam.h>
 
 #define NDD_LOG_INFO
-#define NDD_LOG_DEBUG
-#define NDD_LOG_TRACE
+// #define NDD_LOG_DEBUG
+// #define NDD_LOG_TRACE
 
 #define P_SCALE 8 /* scaling factor for fractions (e.g. gains) */
 #define P_UNIT (1 << P_SCALE)
