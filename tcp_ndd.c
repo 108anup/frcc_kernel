@@ -36,8 +36,9 @@ static u32 static_p_contract_min_qdel_us = 5000; // static_p_ub_rtprop_us / 2;
 // for stability, static_p_contract_min_qdel_us >= rtprop / ground_truth_flow_count,
 // for error, we need static_p_contract_min_qdel_us >= 2 * static_p_ub_rtterr_us
 static u32 static_p_probe_duration_us = 10000; // 10 ms. How should this be set?
-static u32 static_p_probe_multiplier_unit = P_UNIT * 4;  // gamma in the paper
-static u32 static_p_cwnd_averaging_factor_unit = P_UNIT * 1;  // alpha = 1/2 for non-stable design, otherwise 1.
+static u32 static_p_probe_multiplier_unit = P_UNIT * 4; // gamma in the paper
+static u32 static_p_cwnd_averaging_factor_unit =
+	P_UNIT * 1; // alpha = 1/2 for non-stable design, otherwise 1.
 static u32 static_p_cwnd_clamp_hi_unit = P_UNIT * 13 / 10;
 static u32 static_p_cwnd_clamp_lo_unit = P_UNIT * 10 / 13;
 static u32 static_p_slot_load_factor_unit = P_UNIT * 2;
@@ -130,7 +131,7 @@ enum cwnd_event {
 };
 
 struct ndd_data {
-	struct param_data* p_params;
+	struct param_data *p_params;
 
 	u32 id;
 	u64 last_log_time_us;
@@ -163,7 +164,7 @@ struct ndd_data {
 };
 
 #define BASE_FMT                                                               \
-	"flow %u now %llu cwnd %u pacing %lu rtt %u mss %u min_rtprop_us %u " \
+	"flow %u now %llu cwnd %u pacing %lu rtt %u mss %u min_rtprop_us %u "  \
 	"inflight %u "
 #define BASE_VARS                                                              \
 	ndd->id, now_us, tsk->snd_cwnd, sk->sk_pacing_rate, rtt_us,            \
@@ -267,7 +268,7 @@ void log_params(struct sock *sk, struct ndd_data *ndd, struct tcp_sock *tsk,
 static void init_params(struct sock *sk, struct ndd_data *ndd,
 			struct tcp_sock *tsk, u64 now_us)
 {
-	struct param_data* p = ndd->p_params;
+	struct param_data *p = ndd->p_params;
 	p->p_ub_rtprop_us = static_p_ub_rtprop_us;
 	p->p_ub_rtterr_us = static_p_ub_rtterr_us;
 	p->p_ub_flow_count = static_p_ub_flow_count;
@@ -293,10 +294,9 @@ static void init_params(struct sock *sk, struct ndd_data *ndd,
 	log_params(sk, ndd, tsk, now_us);
 }
 
-
 static void reset_round_state(struct ndd_data *ndd)
 {
-	struct param_data* p = ndd->p_params;
+	struct param_data *p = ndd->p_params;
 	ndd->s_round_slots_till_now = 0;
 	ndd->s_round_min_rtt_us = U32_MAX;
 	ndd->s_round_max_rate_pps = 0;
@@ -330,10 +330,10 @@ static void start_new_slot(struct ndd_data *ndd, u64 now_us)
 	ndd->s_slot_max_rtt_us = 0;
 }
 
-static u64 get_rprobe_time(struct ndd_data* ndd, u64 time_us)
+static u64 get_rprobe_time(struct ndd_data *ndd, u64 time_us)
 {
 	// Round down to the nearest multiple of rprobe_interval_us
-	struct param_data* p = ndd->p_params;
+	struct param_data *p = ndd->p_params;
 	return (time_us / p->p_rprobe_interval_us) * p->p_rprobe_interval_us;
 }
 
@@ -437,7 +437,6 @@ static void update_pacing_rate(struct sock *sk, struct ndd_data *ndd,
 	sk->sk_pacing_rate = next_rate_bps;
 }
 
-
 static void update_estimates(struct ndd_data *ndd, struct tcp_sock *tsk,
 			     const struct rate_sample *rs, u32 rtt_us)
 {
@@ -482,7 +481,7 @@ static bool probe_ended(struct ndd_data *ndd, struct tcp_sock *tsk)
 
 static bool cruise_ended(struct ndd_data *ndd, u64 now_us)
 {
-	struct param_data* p = ndd->p_params;
+	struct param_data *p = ndd->p_params;
 	// Super conservative
 	// u64 slot_duration_us = 3 * (ndd->s_slot_max_qdel_us +
 	// p->p_ub_rtprop_us) + p->p_probe_duration_us;
@@ -507,7 +506,7 @@ static bool should_init_probe_end(struct ndd_data *ndd, struct tcp_sock *tsk)
 
 static bool round_ended(struct ndd_data *ndd, struct tcp_sock *tsk)
 {
-	struct param_data* p = ndd->p_params;
+	struct param_data *p = ndd->p_params;
 	return ndd->s_round_slots_till_now >= p->p_slots_per_round;
 }
 
@@ -518,7 +517,7 @@ static bool should_probe(struct ndd_data *ndd)
 
 static u32 get_target_flow_count_unit(struct ndd_data *ndd)
 {
-	struct param_data* p = ndd->p_params;
+	struct param_data *p = ndd->p_params;
 	u32 round_qdel_us;
 	u32 target_flow_count_unit;
 
@@ -532,7 +531,7 @@ static u32 get_target_flow_count_unit(struct ndd_data *ndd)
 
 static u32 get_probe_excess(struct ndd_data *ndd)
 {
-	struct param_data* p = ndd->p_params;
+	struct param_data *p = ndd->p_params;
 	u32 target_flow_count_unit;
 	u64 excess_pkts;
 
@@ -607,7 +606,7 @@ static void update_probe_state(struct sock *sk, struct ndd_data *ndd,
 	// tight interpretation) for flows with different propagation delays.
 	// How might that affect things? We can just pad time if probe has
 	// ended but slot has not.
-	struct param_data* p = ndd->p_params;
+	struct param_data *p = ndd->p_params;
 	u64 last_rcv_seq;
 	u64 last_snd_seq;
 	u64 end_seq_snd_time;
@@ -705,7 +704,7 @@ static void log_slot_end(struct sock *sk, struct ndd_data *ndd,
 static void update_cwnd(struct sock *sk, struct ndd_data *ndd,
 			struct tcp_sock *tsk, u32 rtt_us, u64 now_us)
 {
-	struct param_data* p = ndd->p_params;
+	struct param_data *p = ndd->p_params;
 	u64 bw_estimate_pps;
 	u64 flow_count_belief_unit;
 	u64 target_flow_count_unit;
@@ -721,7 +720,8 @@ static void update_cwnd(struct sock *sk, struct ndd_data *ndd,
 	if (ndd->s_probe->s_probe_min_excess_delay_us > 0) {
 		bw_estimate_pps = ndd->s_probe->s_probe_excess_pkts;
 		bw_estimate_pps *= USEC_PER_SEC;
-		do_div(bw_estimate_pps, ndd->s_probe->s_probe_min_excess_delay_us);
+		do_div(bw_estimate_pps,
+		       ndd->s_probe->s_probe_min_excess_delay_us);
 	}
 
 	flow_count_belief_unit = p->p_ub_flow_count << P_SCALE;
@@ -848,7 +848,8 @@ static void slow_start(struct sock *sk, struct tcp_sock *tsk,
 			// half of waht it is now, so we revert back to that
 			// cwnd.
 			tsk->snd_cwnd = tsk->snd_cwnd / 2;
-			tsk->snd_cwnd = max_t(u32, tsk->snd_cwnd, p->p_lb_cwnd_pkts);
+			tsk->snd_cwnd =
+				max_t(u32, tsk->snd_cwnd, p->p_lb_cwnd_pkts);
 			update_pacing_rate(sk, ndd, tsk, rtt_us);
 			log_cwnd(SLOW_START_END, sk, ndd, tsk, rtt_us, now_us);
 			ndd->s_ss_end_initiated = true;
@@ -878,7 +879,7 @@ static void rprobe(struct sock *sk, struct ndd_data *ndd, struct tcp_sock *tsk,
 {
 	// Note, these values only make sense when the boolean conditions they
 	// are used in are met.
-	struct param_data* p = ndd->p_params;
+	struct param_data *p = ndd->p_params;
 	u64 rprobe_duration_us = ndd->s_slot_max_qdel_us + p->p_ub_rtprop_us;
 	u64 init_rprobe_end_us =
 		ndd->s_rprobe->s_rprobe_start_time_us + rprobe_duration_us;
@@ -925,7 +926,8 @@ static void rprobe(struct sock *sk, struct ndd_data *ndd, struct tcp_sock *tsk,
 		}
 	} else {
 		if (rprobe_ended) {
-			reset_rprobe_state(ndd, ndd->s_rprobe->s_rprobe_start_time_us);
+			reset_rprobe_state(
+				ndd, ndd->s_rprobe->s_rprobe_start_time_us);
 
 			// slow start may also be ongoing, in that
 			// case, we do not touch slow start state. If
@@ -944,7 +946,7 @@ static void on_ack(struct sock *sk, const struct rate_sample *rs)
 {
 	struct ndd_data *ndd = inet_csk_ca(sk);
 	struct tcp_sock *tsk = tcp_sk(sk);
-	struct param_data* p = ndd->p_params;
+	struct param_data *p = ndd->p_params;
 	u32 rtt_us;
 	u64 now_us = tsk->tcp_mstamp;
 	u32 s_slot_min_rtt_us = ndd->s_slot_min_rtt_us;
@@ -974,7 +976,6 @@ static void on_ack(struct sock *sk, const struct rate_sample *rs)
 		slow_start(sk, tsk, ndd, now_us, rtt_us);
 		return;
 	}
-
 
 	if (ndd->s_probe->s_probe_ongoing && should_init_probe_end(ndd, tsk)) {
 		ndd->s_probe->s_probe_end_initiated = true;
