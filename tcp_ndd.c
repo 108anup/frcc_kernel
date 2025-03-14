@@ -46,7 +46,7 @@ static u32 static_p_rprobe_interval_us = 30000000; // 30 seconds
 
 // Design features
 static bool static_f_use_rtprop_probe = true;
-static bool static_f_wait_rtt_after_probe = false;
+static bool static_f_wait_rtt_after_probe = true;
 static bool static_f_use_stable_cwnd_update = true;
 
 // Make all parameters runtime configurable
@@ -986,7 +986,6 @@ static void on_ack(struct sock *sk, const struct rate_sample *rs)
 
 	if ((!ndd->s_probe->s_probe_ongoing && cruise_ended(ndd, now_us)) ||
 	    (ndd->s_probe->s_probe_ongoing && probe_ended(ndd, tsk))) {
-		ndd->s_round_slots_till_now++;
 		log_slot_end(sk, ndd, tsk, rtt_us, now_us);
 
 		// probe ended
@@ -1006,6 +1005,7 @@ static void on_ack(struct sock *sk, const struct rate_sample *rs)
 				    s_slot_min_rtt_us);
 		}
 		start_new_slot(ndd, now_us);
+		ndd->s_round_slots_till_now++;
 	}
 }
 

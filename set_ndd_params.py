@@ -44,7 +44,7 @@ DEFAULT_VALUES = {
     "p_slot_load_factor_unit": P_UNIT * 2,  # P_UNIT * 2
     "p_rprobe_interval_us": 30000000,  # 30 seconds
     "f_use_rtprop_probe": "Y",  # True
-    "f_wait_rtt_after_probe": "N",  # False
+    "f_wait_rtt_after_probe": "Y",  # True
     "f_use_stable_cwnd_update": "Y",  # True
 }
 
