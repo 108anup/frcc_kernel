@@ -43,6 +43,7 @@ static u32 static_p_cwnd_clamp_hi_unit = P_UNIT * 13 / 10;
 static u32 static_p_cwnd_clamp_lo_unit = P_UNIT * 10 / 13;
 static u32 static_p_slot_load_factor_unit = P_UNIT * 2;
 static u32 static_p_rprobe_interval_us = 30000000; // 30 seconds
+static u32 static_p_probe_wait_rtts = 2; // number of rtts to wait after probe
 
 // Design features
 static bool static_f_use_rtprop_probe = true;
@@ -68,6 +69,7 @@ module_param(static_p_cwnd_clamp_hi_unit, uint, 0660);
 module_param(static_p_cwnd_clamp_lo_unit, uint, 0660);
 module_param(static_p_slot_load_factor_unit, uint, 0660);
 module_param(static_p_rprobe_interval_us, uint, 0660);
+module_param(static_p_probe_wait_rtts, uint, 0660);
 module_param(static_f_use_rtprop_probe, bool, 0660);
 module_param(static_f_wait_rtt_after_probe, bool, 0660);
 module_param(static_f_use_stable_cwnd_update, bool, 0660);
@@ -98,6 +100,7 @@ struct param_data {
 	u32 p_slot_load_factor_unit;
 	u32 p_slots_per_round;
 	u32 p_rprobe_interval_us;
+	u32 p_probe_wait_rtts;
 
 	// Design features
 	bool f_use_rtprop_probe;
@@ -119,11 +122,12 @@ struct probe_data {
 	u32 s_probe_excess_pkts;
 	bool s_probe_end_initiated;
 
+	u64 s_probe_start_time_us;
 	u64 s_probe_start_seq;
 	u64 s_probe_inflightmatch_seq;
 	u64 s_probe_first_seq;
 	u64 s_probe_last_seq;
-	u64 s_probe_first_seq_snd_time;
+	u64 s_probe_first_time_us;
 };
 
 struct rprobe_data {
@@ -301,6 +305,7 @@ static void init_params(struct sock *sk, struct ndd_data *ndd,
 	p->p_slots_per_round =
 		(p->p_slot_load_factor_unit * p->p_ub_flow_count) >> P_SCALE;
 	p->p_rprobe_interval_us = static_p_rprobe_interval_us;
+	p->p_probe_wait_rtts = static_p_probe_wait_rtts;
 
 	p->f_use_rtprop_probe = static_f_use_rtprop_probe;
 	p->f_wait_rtt_after_probe = static_f_wait_rtt_after_probe;
@@ -334,11 +339,12 @@ static void reset_probe_state(struct ndd_data *ndd)
 	ndd->s_probe->s_probe_excess_pkts = 0; // should not be read anyway.
 	ndd->s_probe->s_probe_end_initiated = false;
 
+	ndd->s_probe->s_probe_start_time_us = 0;
 	ndd->s_probe->s_probe_start_seq = 0;
 	ndd->s_probe->s_probe_inflightmatch_seq = 0;
 	ndd->s_probe->s_probe_first_seq = 0;
 	ndd->s_probe->s_probe_last_seq = 0;
-	ndd->s_probe->s_probe_first_seq_snd_time = 0;
+	ndd->s_probe->s_probe_first_time_us = 0;
 }
 
 static void start_new_slot(struct ndd_data *ndd, u64 now_us)
@@ -607,11 +613,12 @@ static void start_probe(struct sock *sk, struct ndd_data *ndd,
 	ndd->s_probe->s_probe_excess_pkts = get_probe_excess(ndd);
 	ndd->s_probe->s_probe_end_initiated = false;
 
+	ndd->s_probe->s_probe_start_time_us = now_us;
 	ndd->s_probe->s_probe_start_seq = get_last_snd_seq(tsk);
 	ndd->s_probe->s_probe_inflightmatch_seq = 0;
 	ndd->s_probe->s_probe_first_seq = 0;
 	ndd->s_probe->s_probe_last_seq = 0;
-	ndd->s_probe->s_probe_first_seq_snd_time = 0;
+	ndd->s_probe->s_probe_first_time_us = 0;
 
 	tsk->snd_cwnd = tsk->snd_cwnd + ndd->s_probe->s_probe_excess_pkts;
 	update_pacing_rate(sk, ndd, tsk, rtt_us);
@@ -635,6 +642,11 @@ static void update_probe_state(struct sock *sk, struct ndd_data *ndd,
 
 	u32 max_rtprop_us = max_t(u32, p->p_ub_rtprop_us, ndd->s_min_rtprop_us);
 	u32 max_rtt_us = max_rtprop_us + ndd->s_slot_max_qdel_us;
+
+	u32 wait_time_us = max_rtt_us * p->p_probe_wait_rtts;
+	u64 wait_until_us = ndd->s_probe->s_probe_start_time_us +
+			    wait_time_us;
+
 	u32 probe_duration = p->p_probe_duration_us;
 	if (p->f_probe_duration_max_rtt) {
 		probe_duration = max_rtt_us;
@@ -657,13 +669,13 @@ static void update_probe_state(struct sock *sk, struct ndd_data *ndd,
 			ndd->s_probe->s_probe_inflightmatch_seq = last_snd_seq;
 			if (!p->f_wait_rtt_after_probe) {
 				ndd->s_probe->s_probe_first_seq = last_snd_seq;
-				ndd->s_probe->s_probe_first_seq_snd_time =
-					now_us;
+				ndd->s_probe->s_probe_first_time_us = now_us;
 			}
 #ifdef NDD_LOG_DEBUG
 			printk(KERN_INFO
 			       "ndd probe_inflightmatch flow %u "
-			       "probe_inflightmatch_seq %llu probe_first_seq %llu last_snd_seq %llu last_rcv_seq %llu ",
+			       "probe_inflightmatch_seq %llu probe_first_seq %llu "
+			       "last_snd_seq %llu last_rcv_seq %llu ",
 			       ndd->id, ndd->s_probe->s_probe_inflightmatch_seq,
 			       ndd->s_probe->s_probe_first_seq, last_snd_seq,
 			       last_rcv_seq);
@@ -672,19 +684,22 @@ static void update_probe_state(struct sock *sk, struct ndd_data *ndd,
 	} else if (ndd->s_probe->s_probe_first_seq == 0) {
 		if (after(last_rcv_seq,
 			  ndd->s_probe->s_probe_inflightmatch_seq)) {
-			ndd->s_probe->s_probe_first_seq = last_snd_seq;
-			ndd->s_probe->s_probe_first_seq_snd_time = now_us;
+			if (!p->f_probe_wait_in_max_rtts ||
+			    now_us >= wait_until_us) {
+				ndd->s_probe->s_probe_first_seq = last_snd_seq;
+				ndd->s_probe->s_probe_first_time_us = now_us;
 #ifdef NDD_LOG_DEBUG
-			printk(KERN_INFO
-			       "ndd probe_first_seq flow %u probe_first_seq %llu "
-			       "last_snd_seq %llu last_rcv_seq %llu now %llu ",
-			       ndd->id, ndd->s_probe->s_probe_first_seq,
-			       last_snd_seq, last_rcv_seq, now_us);
+				printk(KERN_INFO
+				       "ndd probe_first_seq flow %u probe_first_seq %llu "
+				       "last_snd_seq %llu last_rcv_seq %llu now %llu ",
+				       ndd->id, ndd->s_probe->s_probe_first_seq,
+				       last_snd_seq, last_rcv_seq, now_us);
 #endif
+			}
 		}
 	} else if (ndd->s_probe->s_probe_last_seq == 0) {
-		end_seq_snd_time = ndd->s_probe->s_probe_first_seq_snd_time +
-				   probe_duration;
+		end_seq_snd_time =
+			ndd->s_probe->s_probe_first_time_us + probe_duration;
 		if (time_after64(now_us, end_seq_snd_time)) {
 			ndd->s_probe->s_probe_last_seq = last_snd_seq;
 #ifdef NDD_LOG_DEBUG
