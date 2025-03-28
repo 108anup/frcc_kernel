@@ -48,6 +48,11 @@ static u32 static_p_rprobe_interval_us = 30000000; // 30 seconds
 static bool static_f_use_rtprop_probe = true;
 static bool static_f_wait_rtt_after_probe = true;
 static bool static_f_use_stable_cwnd_update = true;
+static bool static_f_probe_wait_in_max_rtts = true;
+static bool static_f_probe_duration_max_rtt = true;
+static bool static_f_drain_over_rtt = true;
+static bool static_f_probe_over_rtt = true;
+static bool static_f_slot_greater_than_rtprop = true;
 
 // Make all parameters runtime configurable
 // https://devarea.com/linux-kernel-development-kernel-module-parameters/
@@ -66,6 +71,11 @@ module_param(static_p_rprobe_interval_us, uint, 0660);
 module_param(static_f_use_rtprop_probe, bool, 0660);
 module_param(static_f_wait_rtt_after_probe, bool, 0660);
 module_param(static_f_use_stable_cwnd_update, bool, 0660);
+module_param(static_f_probe_wait_in_max_rtts, bool, 0660);
+module_param(static_f_probe_duration_max_rtt, bool, 0660);
+module_param(static_f_drain_over_rtt, bool, 0660);
+module_param(static_f_probe_over_rtt, bool, 0660);
+module_param(static_f_slot_greater_than_rtprop, bool, 0660);
 // module_param(static_log_level, uint, 0660);
 
 static u32 id = 0;
@@ -93,6 +103,11 @@ struct param_data {
 	bool f_use_rtprop_probe;
 	bool f_wait_rtt_after_probe;
 	bool f_use_stable_cwnd_update;
+	bool f_probe_wait_in_max_rtts;
+	bool f_probe_duration_max_rtt;
+	bool f_drain_over_rtt;
+	bool f_probe_over_rtt;
+	bool f_slot_greater_than_rtprop;
 };
 
 struct probe_data {
@@ -290,6 +305,11 @@ static void init_params(struct sock *sk, struct ndd_data *ndd,
 	p->f_use_rtprop_probe = static_f_use_rtprop_probe;
 	p->f_wait_rtt_after_probe = static_f_wait_rtt_after_probe;
 	p->f_use_stable_cwnd_update = static_f_use_stable_cwnd_update;
+	p->f_probe_wait_in_max_rtts = static_f_probe_wait_in_max_rtts;
+	p->f_probe_duration_max_rtt = static_f_probe_duration_max_rtt;
+	p->f_drain_over_rtt = static_f_drain_over_rtt;
+	p->f_probe_over_rtt = static_f_probe_over_rtt;
+	p->f_slot_greater_than_rtprop = static_f_slot_greater_than_rtprop;
 
 	log_params(sk, ndd, tsk, now_us);
 }
@@ -400,6 +420,11 @@ static bool ndd_valid(struct ndd_data *ndd)
 
 static bool part_of_probe(struct ndd_data *ndd, struct tcp_sock *tsk)
 {
+	// Because last_rcv_seq is the next seq we expect to receive, i.e.,
+	// unacked seq, the current convention here is that first seq - 1 is
+	// included in the acks part of probe and last - 1 is the last included
+	// sequence. We really do want last to be excluded as that is sent
+	// after the cwnd update.
 	u64 last_rcv_seq = get_last_rcv_seq(tsk);
 	if (ndd->s_probe->s_probe_first_seq > 0) {
 		if (ndd->s_probe->s_probe_last_seq > 0) {
@@ -474,9 +499,11 @@ static void update_estimates(struct ndd_data *ndd, struct tcp_sock *tsk,
 
 static bool probe_ended(struct ndd_data *ndd, struct tcp_sock *tsk)
 {
+	// part of probe is first -1 and last -1, so here, we are checking if
+	// una is >= last so that last -1 is definitely acked.
 	u64 last_rcv_seq = get_last_rcv_seq(tsk);
 	return ndd->s_probe->s_probe_last_seq > 0 &&
-	       after(last_rcv_seq, ndd->s_probe->s_probe_last_seq);
+	       !before(last_rcv_seq, ndd->s_probe->s_probe_last_seq);
 }
 
 static bool cruise_ended(struct ndd_data *ndd, u64 now_us)
@@ -601,25 +628,25 @@ static void update_probe_state(struct sock *sk, struct ndd_data *ndd,
 	// TODO: use inflight = cwnd style checks for start and end of probe.
 	// The RTT style checks are upper bounds.
 
-	// TODO: The round durations will likely we off by one slot (because
-	// probing slot duration may not be the same for all flows in this
-	// tight interpretation) for flows with different propagation delays.
-	// How might that affect things? We can just pad time if probe has
-	// ended but slot has not.
 	struct param_data *p = ndd->p_params;
-	u64 last_rcv_seq;
-	u64 last_snd_seq;
+	u64 last_rcv_seq = get_last_rcv_seq(tsk);
+	u64 last_snd_seq = get_last_snd_seq(tsk);
 	u64 end_seq_snd_time;
 
-	last_rcv_seq = get_last_rcv_seq(tsk);
-	last_snd_seq = get_last_snd_seq(tsk);
-	// TODO: check if we should use last_snd_seq or last_snd_seq + 1
+	u32 max_rtprop_us = max_t(u32, p->p_ub_rtprop_us, ndd->s_min_rtprop_us);
+	u32 max_rtt_us = max_rtprop_us + ndd->s_slot_max_qdel_us;
+	u32 probe_duration = p->p_probe_duration_us;
+	if (p->f_probe_duration_max_rtt) {
+		probe_duration = max_rtt_us;
+	}
 
 #ifdef NDD_LOG_TRACE
 	printk(KERN_INFO "ndd probe_state " BASE_FMT PROBE_DEBUG_FMT SEQ_FMT,
 	       BASE_VARS, PROBE_DEBUG_VARS, SEQ_VARS);
 #endif
 
+	// last_snd_seq is what we hope to snd next. Checking una > seq is as
+	// good as checking acked >= seq, which is what we want.
 	if (ndd->s_probe->s_probe_inflightmatch_seq == 0) {
 		// The inflight match will happen after half pre-probe-RTT (old
 		// RTT) under our pacing rate = 2 * new cwnd / old_rtt, i.e.,
@@ -657,7 +684,7 @@ static void update_probe_state(struct sock *sk, struct ndd_data *ndd,
 		}
 	} else if (ndd->s_probe->s_probe_last_seq == 0) {
 		end_seq_snd_time = ndd->s_probe->s_probe_first_seq_snd_time +
-				   p->p_probe_duration_us;
+				   probe_duration;
 		if (time_after64(now_us, end_seq_snd_time)) {
 			ndd->s_probe->s_probe_last_seq = last_snd_seq;
 #ifdef NDD_LOG_DEBUG
@@ -835,6 +862,8 @@ static void slow_start(struct sock *sk, struct tcp_sock *tsk,
 			  p->p_ub_rtterr_us);
 	// TODO: contract_const subsumes rtt_err, so should we really add that
 	// here?
+
+	// checking after for snd_una is same as checking last_acked >= seq.
 	bool ss_ended = ndd->s_ss_last_seq > 0 &&
 			after(last_recv_seq, ndd->s_ss_last_seq);
 

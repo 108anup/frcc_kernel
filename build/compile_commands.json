@@ -77,6 +77,7 @@
       "-pg",
       "-mfentry",
       "-DCC_USING_FENTRY",
+      "-falign-functions=16",
       "-Wdeclaration-after-statement",
       "-Wvla",
       "-Wno-pointer-sign",
@@ -106,7 +107,7 @@
       "/home/anupa/Projects/fairCC/ndd-kernel/tcp_ndd.o",
       "/home/anupa/Projects/fairCC/ndd-kernel/tcp_ndd.c"
     ],
-    "directory": "/usr/src/linux-headers-5.15.0-100-generic",
+    "directory": "/usr/src/linux-headers-5.15.0-134-generic",
     "file": "/home/anupa/Projects/fairCC/ndd-kernel/tcp_ndd.c",
     "output": "/home/anupa/Projects/fairCC/ndd-kernel/tcp_ndd.o"
   },
@@ -164,6 +165,8 @@
       "-DCONFIG_X86_X32_ABI",
       "-Wno-sign-compare",
       "-fno-asynchronous-unwind-tables",
+      "-mindirect-branch=thunk-extern",
+      "-mindirect-branch-register",
       "-mindirect-branch-cs-prefix",
       "-mfunction-return=thunk-extern",
       "-fno-jump-tables",
@@ -188,6 +191,7 @@
       "-pg",
       "-mfentry",
       "-DCC_USING_FENTRY",
+      "-falign-functions=16",
       "-Wdeclaration-after-statement",
       "-Wvla",
       "-Wno-pointer-sign",
@@ -200,6 +204,7 @@
       "-Wno-alloc-size-larger-than",
       "-fno-strict-overflow",
       "-fno-stack-check",
+      "-fconserve-stack",
       "-Werror=date-time",
       "-Werror=incompatible-pointer-types",
       "-Werror=designated-init",
@@ -217,7 +222,7 @@
       "/home/anupa/Projects/fairCC/ndd-kernel/tcp_ndd.mod.o",
       "/home/anupa/Projects/fairCC/ndd-kernel/tcp_ndd.mod.c"
     ],
-    "directory": "/usr/src/linux-headers-5.15.0-100-generic",
+    "directory": "/usr/src/linux-headers-5.15.0-134-generic",
     "file": "/home/anupa/Projects/fairCC/ndd-kernel/tcp_ndd.mod.c",
     "output": "/home/anupa/Projects/fairCC/ndd-kernel/tcp_ndd.mod.o"
   }
