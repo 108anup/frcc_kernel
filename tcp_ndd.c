@@ -515,16 +515,39 @@ static bool probe_ended(struct ndd_data *ndd, struct tcp_sock *tsk)
 static bool cruise_ended(struct ndd_data *ndd, u64 now_us)
 {
 	struct param_data *p = ndd->p_params;
-	// Super conservative
-	// u64 slot_duration_us = 3 * (ndd->s_slot_max_qdel_us +
-	// p->p_ub_rtprop_us) + p->p_probe_duration_us;
+	u32 max_rtprop_us, max_rtt_us, probe_duration_us, drain_duration_us,
+		slot_duration_us;
 	u64 slot_end_us;
-	u64 slot_duration_us = 3 * ndd->s_slot_max_qdel_us +
-			       2 * p->p_ub_rtprop_us + p->p_probe_duration_us;
-	if (!p->f_wait_rtt_after_probe) {
-		slot_duration_us = 2 * ndd->s_slot_max_qdel_us +
-				   p->p_ub_rtprop_us + p->p_probe_duration_us;
+
+	max_rtprop_us = p->p_ub_rtprop_us;
+	if (p->f_slot_greater_than_rtprop) {
+		max_rtprop_us =
+			max_t(u32, ndd->s_min_rtprop_us, p->p_ub_rtprop_us);
 	}
+
+	max_rtt_us = max_rtprop_us + ndd->s_slot_max_qdel_us;
+	
+	probe_duration_us = p->p_probe_duration_us;
+	if (p->f_probe_duration_max_rtt) {
+		probe_duration_us = max_rtt_us;
+	}
+
+	drain_duration_us = ndd->s_slot_max_qdel_us;
+	if (p->f_drain_over_rtt) {
+		drain_duration_us = max_rtt_us;
+	}
+
+	slot_duration_us = max_rtt_us + probe_duration_us + drain_duration_us;
+	if (p->f_wait_rtt_after_probe) {
+		slot_duration_us += max_rtt_us;
+	}
+	if (p->f_probe_wait_in_max_rtts) {
+		slot_duration_us =
+			max_t(u32, slot_duration_us,
+			      max_rtt_us * p->p_probe_wait_rtts +
+				      probe_duration_us + drain_duration_us);
+	}
+
 	slot_end_us = ndd->s_slot_start_time_us + slot_duration_us;
 	return time_after64(now_us, slot_end_us);
 }
@@ -647,9 +670,9 @@ static void update_probe_state(struct sock *sk, struct ndd_data *ndd,
 	u64 wait_until_us = ndd->s_probe->s_probe_start_time_us +
 			    wait_time_us;
 
-	u32 probe_duration = p->p_probe_duration_us;
+	u32 probe_duration_us = p->p_probe_duration_us;
 	if (p->f_probe_duration_max_rtt) {
-		probe_duration = max_rtt_us;
+		probe_duration_us = max_rtt_us;
 	}
 
 #ifdef NDD_LOG_TRACE
@@ -699,7 +722,7 @@ static void update_probe_state(struct sock *sk, struct ndd_data *ndd,
 		}
 	} else if (ndd->s_probe->s_probe_last_seq == 0) {
 		end_seq_snd_time =
-			ndd->s_probe->s_probe_first_time_us + probe_duration;
+			ndd->s_probe->s_probe_first_time_us + probe_duration_us;
 		if (time_after64(now_us, end_seq_snd_time)) {
 			ndd->s_probe->s_probe_last_seq = last_snd_seq;
 #ifdef NDD_LOG_DEBUG
