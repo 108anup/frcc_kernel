@@ -121,6 +121,8 @@ struct probe_data {
 	u32 s_probe_prev_cwnd_pkts;
 	u32 s_probe_excess_pkts;
 	bool s_probe_end_initiated;
+	u32 s_probe_drain_pkts_unit;
+	u32 s_probe_drain_pkts_rem_unit;
 
 	u64 s_probe_start_time_us;
 	u64 s_probe_start_seq;
@@ -338,6 +340,8 @@ static void reset_probe_state(struct ndd_data *ndd)
 	ndd->s_probe->s_probe_prev_cwnd_pkts = 0; // should not be read anyway.
 	ndd->s_probe->s_probe_excess_pkts = 0; // should not be read anyway.
 	ndd->s_probe->s_probe_end_initiated = false;
+	ndd->s_probe->s_probe_drain_pkts_unit = 0;
+	ndd->s_probe->s_probe_drain_pkts_rem_unit = 0;
 
 	ndd->s_probe->s_probe_start_time_us = 0;
 	ndd->s_probe->s_probe_start_seq = 0;
@@ -635,6 +639,8 @@ static void start_probe(struct sock *sk, struct ndd_data *ndd,
 	ndd->s_probe->s_probe_prev_cwnd_pkts = tsk->snd_cwnd;
 	ndd->s_probe->s_probe_excess_pkts = get_probe_excess(ndd);
 	ndd->s_probe->s_probe_end_initiated = false;
+	ndd->s_probe->s_probe_drain_pkts_unit = 0;
+	ndd->s_probe->s_probe_drain_pkts_rem_unit = 0;
 
 	ndd->s_probe->s_probe_start_time_us = now_us;
 	ndd->s_probe->s_probe_start_seq = get_last_snd_seq(tsk);
@@ -648,6 +654,45 @@ static void start_probe(struct sock *sk, struct ndd_data *ndd,
 
 	log_probe_start(sk, ndd, tsk, rtt_us, now_us);
 	log_cwnd(PROBE_GAIN, sk, ndd, tsk, rtt_us, now_us);
+}
+
+static void update_cwnd_drain(struct sock *sk, struct ndd_data *ndd,
+			      struct tcp_sock *tsk, u32 rtt_us, u64 now_us)
+{
+	struct param_data *p = ndd->p_params;
+	u32 this_drain_pkts;
+	if (!p->f_drain_over_rtt) {
+		return;
+	}
+
+	ndd->s_probe->s_probe_drain_pkts_rem_unit += ndd->s_probe->s_probe_drain_pkts_unit;
+	this_drain_pkts = ndd->s_probe->s_probe_drain_pkts_rem_unit >> P_SCALE;
+	ndd->s_probe->s_probe_drain_pkts_rem_unit &= P_UNIT - 1;
+
+	tsk->snd_cwnd = tsk->snd_cwnd - this_drain_pkts;
+	update_pacing_rate(sk, ndd, tsk, rtt_us);
+	log_cwnd(PROBE_DRAIN, sk, ndd, tsk, rtt_us, now_us);
+}
+
+static void initiate_probe_end(struct sock *sk, struct ndd_data *ndd,
+				 struct tcp_sock *tsk, u32 rtt_us, u64 now_us)
+{
+	struct param_data *p = ndd->p_params;
+	ndd->s_probe->s_probe_end_initiated = true;
+	if (!p->f_drain_over_rtt) {
+		tsk->snd_cwnd = ndd->s_probe->s_probe_prev_cwnd_pkts;
+		update_pacing_rate(sk, ndd, tsk, rtt_us);
+		log_cwnd(PROBE_DRAIN, sk, ndd, tsk, rtt_us, now_us);
+	} else {
+		// We are amortizing the decrease over a window, so every ack,
+		// we will reduce by drain_pkts pkts.
+		ndd->s_probe->s_probe_drain_pkts_unit =
+			ndd->s_probe->s_probe_excess_pkts << P_SCALE;
+		do_div(ndd->s_probe->s_probe_drain_pkts_unit,
+		       tsk->snd_cwnd);
+		ndd->s_probe->s_probe_drain_pkts_rem_unit = 0;
+		update_cwnd_drain(sk, ndd, tsk, rtt_us, now_us);
+	}
 }
 
 static void update_probe_state(struct sock *sk, struct ndd_data *ndd,
@@ -1044,11 +1089,12 @@ static void on_ack(struct sock *sk, const struct rate_sample *rs)
 		return;
 	}
 
-	if (ndd->s_probe->s_probe_ongoing && should_init_probe_end(ndd, tsk)) {
-		ndd->s_probe->s_probe_end_initiated = true;
-		tsk->snd_cwnd = ndd->s_probe->s_probe_prev_cwnd_pkts;
-		update_pacing_rate(sk, ndd, tsk, rtt_us);
-		log_cwnd(PROBE_DRAIN, sk, ndd, tsk, rtt_us, now_us);
+	if (ndd->s_probe->s_probe_ongoing) {
+		if (should_init_probe_end(ndd, tsk)) {
+			initiate_probe_end(sk, ndd, tsk, rtt_us, now_us);
+		} else if (ndd->s_probe->s_probe_end_initiated) {
+			update_cwnd_drain(sk, ndd, tsk, rtt_us, now_us);
+		}
 	}
 
 	if ((!ndd->s_probe->s_probe_ongoing && cruise_ended(ndd, now_us)) ||
