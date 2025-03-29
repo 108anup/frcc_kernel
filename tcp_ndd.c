@@ -558,6 +558,8 @@ static bool cruise_ended(struct ndd_data *ndd, u64 now_us)
 
 static bool should_init_probe_end(struct ndd_data *ndd, struct tcp_sock *tsk)
 {
+	// since last-1 is the last seq part of probe, we are chekcing whether
+	// next_snd is >= last, this means last-1 has been sent.
 	u32 last_snd_seq = get_last_snd_seq(tsk);
 	return ndd->s_probe->s_probe_last_seq > 0 &&
 	       !before(last_snd_seq, ndd->s_probe->s_probe_last_seq) &&
@@ -815,14 +817,15 @@ static void update_cwnd(struct sock *sk, struct ndd_data *ndd,
 			struct tcp_sock *tsk, u32 rtt_us, u64 now_us)
 {
 	struct param_data *p = ndd->p_params;
+	u32 prev_cwnd = ndd->s_probe->s_probe_prev_cwnd_pkts; // tsk->snd_cwnd;
 	u64 bw_estimate_pps;
 	u64 flow_count_belief_unit;
 	u64 target_flow_count_unit;
 	u64 target_cwnd_unit;
 	u64 next_cwnd_unit;
 	u32 next_cwnd;
-	u64 tcwnd_hi_clamp_unit = tsk->snd_cwnd * p->p_cwnd_clamp_hi_unit;
-	u64 tcwnd_lo_clamp_unit = tsk->snd_cwnd * p->p_cwnd_clamp_lo_unit;
+	u64 tcwnd_hi_clamp_unit = prev_cwnd * p->p_cwnd_clamp_hi_unit;
+	u64 tcwnd_lo_clamp_unit = prev_cwnd * p->p_cwnd_clamp_lo_unit;
 	u64 tcwnd_num;
 	u64 tcwnd_den;
 
@@ -853,10 +856,10 @@ static void update_cwnd(struct sock *sk, struct ndd_data *ndd,
 	// be same as target_flow_count_unit). We expect cwnd to be large so
 	// that the clamp times cwnd is a different value.
 	if (target_flow_count_unit == 0) {
-		target_cwnd_unit = tsk->snd_cwnd * p->p_cwnd_clamp_hi_unit;
+		target_cwnd_unit = prev_cwnd * p->p_cwnd_clamp_hi_unit;
 	} else {
 		if (p->f_use_stable_cwnd_update) {
-			target_cwnd_unit = tsk->snd_cwnd << P_SCALE;
+			target_cwnd_unit = prev_cwnd << P_SCALE;
 			tcwnd_num = (ndd->s_min_rtprop_us << P_SCALE) +
 				    p->p_contract_min_qdel_us *
 					    flow_count_belief_unit;
@@ -870,7 +873,7 @@ static void update_cwnd(struct sock *sk, struct ndd_data *ndd,
 			// Will unit^2 overflow?
 			// target_cwnd_unit = target_cwnd_unit << P_SCALE;
 		} else {
-			target_cwnd_unit = tsk->snd_cwnd << P_SCALE;
+			target_cwnd_unit = prev_cwnd << P_SCALE;
 			target_cwnd_unit *= flow_count_belief_unit;
 			do_div(target_cwnd_unit, target_flow_count_unit);
 		}
@@ -879,7 +882,7 @@ static void update_cwnd(struct sock *sk, struct ndd_data *ndd,
 	target_cwnd_unit = min_t(u64, target_cwnd_unit, tcwnd_hi_clamp_unit);
 
 	next_cwnd_unit =
-		p->p_inv_cwnd_averaging_factor_unit * tsk->snd_cwnd +
+		p->p_inv_cwnd_averaging_factor_unit * prev_cwnd +
 		((p->p_cwnd_averaging_factor_unit * target_cwnd_unit) >>
 		 P_SCALE);
 
@@ -888,7 +891,7 @@ static void update_cwnd(struct sock *sk, struct ndd_data *ndd,
 	       "ndd cwnd_update_debug flow %u alpha %u 1-alpha %u cwnd %u "
 	       "target_cwnd %llu next_cwnd %llu ",
 	       ndd->id, p->p_cwnd_averaging_factor_unit,
-	       p->p_inv_cwnd_averaging_factor_unit, tsk->snd_cwnd,
+	       p->p_inv_cwnd_averaging_factor_unit, prev_cwnd
 	       target_cwnd_unit, next_cwnd_unit);
 #endif
 
