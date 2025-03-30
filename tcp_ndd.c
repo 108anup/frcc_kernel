@@ -659,7 +659,8 @@ static void start_probe(struct sock *sk, struct ndd_data *ndd,
 }
 
 static void update_cwnd_drain(struct sock *sk, struct ndd_data *ndd,
-			      struct tcp_sock *tsk, u32 rtt_us, u64 now_us)
+			      struct tcp_sock *tsk, u32 rtt_us, u64 now_us,
+			      const struct rate_sample *rs)
 {
 	struct param_data *p = ndd->p_params;
 	u32 this_drain_pkts;
@@ -667,7 +668,10 @@ static void update_cwnd_drain(struct sock *sk, struct ndd_data *ndd,
 		return;
 	}
 
-	ndd->s_probe->s_probe_drain_pkts_rem_unit += ndd->s_probe->s_probe_drain_pkts_unit;
+	// TODO: increase precision here as cwnd is larger than P_UNIT. Ideally
+	// we want P_UNIT > the denominator = cwnd.
+	ndd->s_probe->s_probe_drain_pkts_rem_unit +=
+		ndd->s_probe->s_probe_drain_pkts_unit * rs->acked_sacked;
 	this_drain_pkts = ndd->s_probe->s_probe_drain_pkts_rem_unit >> P_SCALE;
 	ndd->s_probe->s_probe_drain_pkts_rem_unit &= P_UNIT - 1;
 
@@ -677,7 +681,8 @@ static void update_cwnd_drain(struct sock *sk, struct ndd_data *ndd,
 }
 
 static void initiate_probe_end(struct sock *sk, struct ndd_data *ndd,
-				 struct tcp_sock *tsk, u32 rtt_us, u64 now_us)
+			       struct tcp_sock *tsk, u32 rtt_us, u64 now_us,
+			       const struct rate_sample *rs)
 {
 	struct param_data *p = ndd->p_params;
 	ndd->s_probe->s_probe_end_initiated = true;
@@ -693,7 +698,7 @@ static void initiate_probe_end(struct sock *sk, struct ndd_data *ndd,
 		do_div(ndd->s_probe->s_probe_drain_pkts_unit,
 		       tsk->snd_cwnd);
 		ndd->s_probe->s_probe_drain_pkts_rem_unit = 0;
-		update_cwnd_drain(sk, ndd, tsk, rtt_us, now_us);
+		update_cwnd_drain(sk, ndd, tsk, rtt_us, now_us, rs);
 	}
 }
 
@@ -1094,9 +1099,9 @@ static void on_ack(struct sock *sk, const struct rate_sample *rs)
 
 	if (ndd->s_probe->s_probe_ongoing) {
 		if (should_init_probe_end(ndd, tsk)) {
-			initiate_probe_end(sk, ndd, tsk, rtt_us, now_us);
+			initiate_probe_end(sk, ndd, tsk, rtt_us, now_us, rs);
 		} else if (ndd->s_probe->s_probe_end_initiated) {
-			update_cwnd_drain(sk, ndd, tsk, rtt_us, now_us);
+			update_cwnd_drain(sk, ndd, tsk, rtt_us, now_us, rs);
 		}
 	}
 

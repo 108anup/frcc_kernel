@@ -21,10 +21,16 @@ PARAMS = {
     "p_cwnd_clamp_lo_unit": int,
     "p_slot_load_factor_unit": int,
     "p_rprobe_interval_us": int,
+    "p_probe_wait_rtts": int,
 
     "f_use_rtprop_probe": bool,
     "f_wait_rtt_after_probe": bool,
     "f_use_stable_cwnd_update": bool,
+    "f_probe_wait_in_max_rtts": bool,
+    "f_probe_duration_max_rtt": bool,
+    "f_drain_over_rtt": bool,
+    "f_probe_over_rtt": bool,
+    "f_slot_greater_than_rtprop": bool,
 }
 
 P_SCALE = 8
@@ -34,6 +40,7 @@ DEFAULT_VALUES = {
     "p_ub_rtprop_us": 10000,  # 10 ms
     "p_ub_rtterr_us": 10000,  # 10 ms
     "p_ub_flow_count": 5,
+
     "p_lb_cwnd_pkts": 4,
     "p_contract_min_qdel_us": 5000,  # p_ub_rtprop_us / 2
     "p_probe_duration_us": 10000,  # 10 ms
@@ -43,9 +50,16 @@ DEFAULT_VALUES = {
     "p_cwnd_clamp_lo_unit": (P_UNIT * 10) // 13,  # P_UNIT * 10 / 13
     "p_slot_load_factor_unit": P_UNIT * 2,  # P_UNIT * 2
     "p_rprobe_interval_us": 30000000,  # 30 seconds
+    "p_probe_wait_rtts": 2,
+
     "f_use_rtprop_probe": "Y",  # True
     "f_wait_rtt_after_probe": "Y",  # True
     "f_use_stable_cwnd_update": "Y",  # True
+    "f_probe_wait_in_max_rtts": "Y",
+    "f_probe_duration_max_rtt": "Y",
+    "f_drain_over_rtt": "Y",
+    "f_probe_over_rtt": "Y",
+    "f_slot_greater_than_rtprop": "Y",
 }
 
 MODULE_PATH = "/sys/module/tcp_ndd/parameters/"
