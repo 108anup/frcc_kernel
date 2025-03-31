@@ -21,9 +21,9 @@ NDD: A provably fair and robust congestion controller
 // static enum log_level static_log_level = LOG_INFO;
 
 // Assumptions about network scenarios
-static u32 static_p_ub_rtprop_us = 10000; // 10 ms
+static u32 static_p_ub_rtprop_us = 100000; // 100 ms
 static u32 static_p_ub_rtterr_us = 10000; // 10 ms
-static u32 static_p_ub_flow_count = 5;
+static u32 static_p_ub_flow_count = 10;
 
 // Design parameters
 // TODO: check if these floating values make sense given the UNIT. Should we
@@ -32,7 +32,7 @@ static u32 static_p_lb_cwnd_pkts = 4;
 // ^^ this should be such that, p_cwnd_clamp_hi increases this by at least 1,
 // otherwise even at the maximum increase, the cwnd will not increase due to
 // integer arithmetic.
-static u32 static_p_contract_min_qdel_us = 5000; // static_p_ub_rtprop_us / 2;
+static u32 static_p_contract_min_qdel_us = 10000; // static_p_ub_rtprop_us / 2;
 // for stability, static_p_contract_min_qdel_us >= rtprop / ground_truth_flow_count,
 // for error, we need static_p_contract_min_qdel_us >= 2 * static_p_ub_rtterr_us
 static u32 static_p_probe_duration_us = 10000; // 10 ms. How should this be set?
@@ -41,7 +41,7 @@ static u32 static_p_cwnd_averaging_factor_unit =
 	P_UNIT * 1; // alpha = 1/2 for non-stable design, otherwise 1.
 static u32 static_p_cwnd_clamp_hi_unit = P_UNIT * 13 / 10;
 static u32 static_p_cwnd_clamp_lo_unit = P_UNIT * 10 / 13;
-static u32 static_p_slot_load_factor_unit = P_UNIT * 2;
+static u32 static_p_slot_load_factor_unit = P_UNIT * 1;
 static u32 static_p_rprobe_interval_us = 30000000; // 30 seconds
 static u32 static_p_probe_wait_rtts = 2; // number of rtts to wait after probe
 
