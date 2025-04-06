@@ -39,7 +39,7 @@ P_UNIT = 1 << P_SCALE
 DEFAULT_VALUES = {
     "p_ub_rtprop_us": 100000,  # 100 ms
     "p_ub_rtterr_us": 10000,  # 10 ms
-    "p_ub_flow_count": 10,
+    "p_ub_flow_count": 5,
 
     "p_lb_cwnd_pkts": 4,
     "p_contract_min_qdel_us": 10000,  # p_ub_rtprop_us / 2
@@ -48,7 +48,7 @@ DEFAULT_VALUES = {
     "p_cwnd_averaging_factor_unit": P_UNIT * 1,  # P_UNIT * 1
     "p_cwnd_clamp_hi_unit": (P_UNIT * 13) // 10,  # P_UNIT * 13 / 10
     "p_cwnd_clamp_lo_unit": (P_UNIT * 10) // 13,  # P_UNIT * 10 / 13
-    "p_slot_load_factor_unit": P_UNIT * 1,  # P_UNIT * 1
+    "p_slot_load_factor_unit": P_UNIT * 2,  # P_UNIT * 1
     "p_rprobe_interval_us": 30000000,  # 30 seconds
     "p_probe_wait_rtts": 2,
 

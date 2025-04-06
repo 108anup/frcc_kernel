@@ -23,7 +23,7 @@ NDD: A provably fair and robust congestion controller
 // Assumptions about network scenarios
 static u32 static_p_ub_rtprop_us = 100000; // 100 ms
 static u32 static_p_ub_rtterr_us = 10000; // 10 ms
-static u32 static_p_ub_flow_count = 10;
+static u32 static_p_ub_flow_count = 5;
 
 // Design parameters
 // TODO: check if these floating values make sense given the UNIT. Should we
@@ -41,7 +41,7 @@ static u32 static_p_cwnd_averaging_factor_unit =
 	P_UNIT * 1; // alpha = 1/2 for non-stable design, otherwise 1.
 static u32 static_p_cwnd_clamp_hi_unit = P_UNIT * 13 / 10;
 static u32 static_p_cwnd_clamp_lo_unit = P_UNIT * 10 / 13;
-static u32 static_p_slot_load_factor_unit = P_UNIT * 1;
+static u32 static_p_slot_load_factor_unit = P_UNIT * 2;
 static u32 static_p_rprobe_interval_us = 30000000; // 30 seconds
 static u32 static_p_probe_wait_rtts = 2; // number of rtts to wait after probe
 
@@ -574,17 +574,6 @@ static bool should_init_probe_end(struct ndd_data *ndd, struct tcp_sock *tsk)
 	       !ndd->s_probe->s_probe_end_initiated;
 }
 
-static bool round_ended(struct ndd_data *ndd, struct tcp_sock *tsk)
-{
-	struct param_data *p = ndd->p_params;
-	return ndd->s_round_slots_till_now >= p->p_slots_per_round;
-}
-
-static bool should_probe(struct ndd_data *ndd)
-{
-	return ndd->s_round_slots_till_now >= ndd->s_round_probe_slot_idx;
-}
-
 static u32 get_target_flow_count_unit(struct ndd_data *ndd)
 {
 	struct param_data *p = ndd->p_params;
@@ -597,6 +586,22 @@ static u32 get_target_flow_count_unit(struct ndd_data *ndd)
 	do_div(target_flow_count_unit, p->p_contract_min_qdel_us);
 
 	return target_flow_count_unit;
+}
+
+static bool round_ended(struct ndd_data *ndd, struct tcp_sock *tsk)
+{
+	struct param_data *p = ndd->p_params;
+	u32 target_flow_count_unit = get_target_flow_count_unit(ndd);
+	u32 p_slots_per_round = target_flow_count_unit * p->p_slot_load_factor_unit;
+	do_div(p_slots_per_round, P_UNIT);
+	p_slots_per_round = max_t(u32, p_slots_per_round, p->p_slots_per_round);
+
+	return ndd->s_round_slots_till_now >= p_slots_per_round;
+}
+
+static bool should_probe(struct ndd_data *ndd)
+{
+	return ndd->s_round_slots_till_now >= ndd->s_round_probe_slot_idx;
 }
 
 static u32 get_probe_excess(struct ndd_data *ndd)
@@ -851,15 +856,12 @@ static void update_cwnd(struct sock *sk, struct ndd_data *ndd,
 		       ndd->s_probe->s_probe_min_excess_delay_us);
 	}
 
-	flow_count_belief_unit = p->p_ub_flow_count << P_SCALE;
+	flow_count_belief_unit = p->p_ub_flow_count << P_SCALE; // this can be anything as this will never be read.
 	if (ndd->s_round_max_rate_pps > 0) {
 		flow_count_belief_unit = P_UNIT;
 		flow_count_belief_unit *= bw_estimate_pps;
 		do_div(flow_count_belief_unit, ndd->s_round_max_rate_pps);
 	}
-	// TODO: is this needed? we clamp flow_count_belief anyway.
-	// flow_count_belief_unit = min_t(u64, flow_count_belief_unit,
-	// p->p_ub_flow_count << P_SCALE);
 	flow_count_belief_unit = max_t(u64, flow_count_belief_unit, P_UNIT);
 
 	target_flow_count_unit = get_target_flow_count_unit(ndd);
@@ -869,7 +871,7 @@ static void update_cwnd(struct sock *sk, struct ndd_data *ndd,
 	// (target_flow_count_unit might be small, so clamps times this might
 	// be same as target_flow_count_unit). We expect cwnd to be large so
 	// that the clamp times cwnd is a different value.
-	if (target_flow_count_unit == 0) {
+	if (target_flow_count_unit == 0 || ndd->s_round_max_rate_pps == 0) {
 		target_cwnd_unit = prev_cwnd * p->p_cwnd_clamp_hi_unit;
 	} else {
 		if (p->f_use_stable_cwnd_update) {
