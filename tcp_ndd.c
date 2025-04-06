@@ -23,7 +23,7 @@ NDD: A provably fair and robust congestion controller
 // Assumptions about network scenarios
 static u32 static_p_ub_rtprop_us = 100000; // 100 ms
 static u32 static_p_ub_rtterr_us = 10000; // 10 ms
-static u32 static_p_ub_flow_count = 5;
+static u32 static_p_ub_flow_count = 3;
 
 // Design parameters
 // TODO: check if these floating values make sense given the UNIT. Should we
@@ -42,6 +42,7 @@ static u32 static_p_cwnd_averaging_factor_unit =
 static u32 static_p_cwnd_clamp_hi_unit = P_UNIT * 13 / 10;
 static u32 static_p_cwnd_clamp_lo_unit = P_UNIT * 10 / 13;
 static u32 static_p_slot_load_factor_unit = P_UNIT * 2;
+static u32 static_p_ub_slots_per_round = 20;
 static u32 static_p_rprobe_interval_us = 30000000; // 30 seconds
 static u32 static_p_probe_wait_rtts = 2; // number of rtts to wait after probe
 
@@ -68,6 +69,7 @@ module_param(static_p_cwnd_averaging_factor_unit, uint, 0660);
 module_param(static_p_cwnd_clamp_hi_unit, uint, 0660);
 module_param(static_p_cwnd_clamp_lo_unit, uint, 0660);
 module_param(static_p_slot_load_factor_unit, uint, 0660);
+module_param(static_p_ub_slots_per_round, uint, 0660);
 module_param(static_p_rprobe_interval_us, uint, 0660);
 module_param(static_p_probe_wait_rtts, uint, 0660);
 module_param(static_f_use_rtprop_probe, bool, 0660);
@@ -98,7 +100,7 @@ struct param_data {
 	u32 p_cwnd_clamp_hi_unit;
 	u32 p_cwnd_clamp_lo_unit;
 	u32 p_slot_load_factor_unit;
-	u32 p_slots_per_round;
+	u32 p_ub_slots_per_round;
 	u32 p_rprobe_interval_us;
 	u32 p_probe_wait_rtts;
 
@@ -272,7 +274,7 @@ void log_params(struct sock *sk, struct ndd_data *ndd, struct tcp_sock *tsk,
 	       "p_probe_multiplier_unit %u p_cwnd_averaging_factor_unit %u "
 	       "p_inv_cwnd_averaging_factor_unit %u p_cwnd_clamp_hi_unit %u "
 	       "p_cwnd_clamp_lo_unit %u p_slot_load_factor_unit %u "
-	       "p_slots_per_round %u p_rprobe_interval_us %u "
+	       "p_ub_slots_per_round %u p_rprobe_interval_us %u "
 	       "f_use_rtprop_probe %u f_wait_rtt_after_probe %u f_use_stable_cwnd_update %u ",
 	       BASE_VARS, p->p_ub_rtprop_us, p->p_ub_rtterr_us,
 	       p->p_ub_flow_count, p->p_lb_cwnd_pkts, p->p_contract_min_qdel_us,
@@ -280,7 +282,7 @@ void log_params(struct sock *sk, struct ndd_data *ndd, struct tcp_sock *tsk,
 	       p->p_cwnd_averaging_factor_unit,
 	       p->p_inv_cwnd_averaging_factor_unit, p->p_cwnd_clamp_hi_unit,
 	       p->p_cwnd_clamp_lo_unit, p->p_slot_load_factor_unit,
-	       p->p_slots_per_round, p->p_rprobe_interval_us,
+	       p->p_ub_slots_per_round, p->p_rprobe_interval_us,
 	       p->f_use_rtprop_probe, p->f_wait_rtt_after_probe,
 	       p->f_use_stable_cwnd_update);
 #endif
@@ -304,8 +306,7 @@ static void init_params(struct sock *sk, struct ndd_data *ndd,
 	p->p_cwnd_clamp_hi_unit = static_p_cwnd_clamp_hi_unit;
 	p->p_cwnd_clamp_lo_unit = static_p_cwnd_clamp_lo_unit;
 	p->p_slot_load_factor_unit = static_p_slot_load_factor_unit;
-	p->p_slots_per_round =
-		(p->p_slot_load_factor_unit * p->p_ub_flow_count) >> P_SCALE;
+	p->p_ub_slots_per_round = static_p_ub_slots_per_round;
 	p->p_rprobe_interval_us = static_p_rprobe_interval_us;
 	p->p_probe_wait_rtts = static_p_probe_wait_rtts;
 
@@ -321,13 +322,45 @@ static void init_params(struct sock *sk, struct ndd_data *ndd,
 	log_params(sk, ndd, tsk, now_us);
 }
 
-static void reset_round_state(struct ndd_data *ndd)
+static u32 get_target_flow_count_unit(struct ndd_data *ndd)
 {
 	struct param_data *p = ndd->p_params;
+	u32 round_qdel_us;
+	u32 target_flow_count_unit;
+
+	round_qdel_us = ndd->s_round_min_rtt_us - ndd->s_min_rtprop_us;
+	target_flow_count_unit = P_UNIT;
+	target_flow_count_unit *= round_qdel_us;
+	do_div(target_flow_count_unit, p->p_contract_min_qdel_us);
+
+	return target_flow_count_unit;
+}
+
+static u32 get_slots_per_round(struct ndd_data *ndd)
+{
+	struct param_data *p = ndd->p_params;
+	u32 p_lb_slots_per_round =
+		(p->p_ub_flow_count * p->p_slot_load_factor_unit) >> P_SCALE;
+	u32 target_flow_count_unit = get_target_flow_count_unit(ndd);
+	u32 p_slots_per_round =
+		target_flow_count_unit * p->p_slot_load_factor_unit;
+	// remove P_UNIT^2
+	p_slots_per_round = p_slots_per_round >> P_SCALE;
+	p_slots_per_round = p_slots_per_round >> P_SCALE;
+
+	p_slots_per_round = max_t(u32, p_slots_per_round, p_lb_slots_per_round);
+	p_slots_per_round =
+		min_t(u32, p_slots_per_round, p->p_ub_slots_per_round);
+
+	return p_slots_per_round;
+}
+
+static void reset_round_state(struct ndd_data *ndd)
+{
 	ndd->s_round_slots_till_now = 0;
 	ndd->s_round_min_rtt_us = U32_MAX;
 	ndd->s_round_max_rate_pps = 0;
-	ndd->s_round_probe_slot_idx = 1 + prandom_u32_max(p->p_slots_per_round);
+	ndd->s_round_probe_slot_idx = 1 + prandom_u32_max(get_slots_per_round(ndd));
 	ndd->s_round_probed = false;
 }
 
@@ -574,29 +607,9 @@ static bool should_init_probe_end(struct ndd_data *ndd, struct tcp_sock *tsk)
 	       !ndd->s_probe->s_probe_end_initiated;
 }
 
-static u32 get_target_flow_count_unit(struct ndd_data *ndd)
+static bool round_ended(struct ndd_data *ndd)
 {
-	struct param_data *p = ndd->p_params;
-	u32 round_qdel_us;
-	u32 target_flow_count_unit;
-
-	round_qdel_us = ndd->s_round_min_rtt_us - ndd->s_min_rtprop_us;
-	target_flow_count_unit = P_UNIT;
-	target_flow_count_unit *= round_qdel_us;
-	do_div(target_flow_count_unit, p->p_contract_min_qdel_us);
-
-	return target_flow_count_unit;
-}
-
-static bool round_ended(struct ndd_data *ndd, struct tcp_sock *tsk)
-{
-	struct param_data *p = ndd->p_params;
-	u32 target_flow_count_unit = get_target_flow_count_unit(ndd);
-	u32 p_slots_per_round = target_flow_count_unit * p->p_slot_load_factor_unit;
-	do_div(p_slots_per_round, P_UNIT);
-	p_slots_per_round = max_t(u32, p_slots_per_round, p->p_slots_per_round);
-
-	return ndd->s_round_slots_till_now >= p_slots_per_round;
+	return ndd->s_round_slots_till_now >= get_slots_per_round(ndd);
 }
 
 static bool should_probe(struct ndd_data *ndd)
@@ -1126,7 +1139,7 @@ static void on_ack(struct sock *sk, const struct rate_sample *rs)
 			reset_probe_state(ndd);
 		}
 
-		if (round_ended(ndd, tsk)) {
+		if (round_ended(ndd)) {
 			reset_round_state(ndd);
 		}
 
