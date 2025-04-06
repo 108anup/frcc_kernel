@@ -465,10 +465,18 @@ static u32 get_initial_rtt(struct tcp_sock *tsk)
 }
 
 static void update_pacing_rate(struct sock *sk, struct ndd_data *ndd,
-			       struct tcp_sock *tsk, u32 rtt_us)
+			       struct tcp_sock *tsk, u32 rtt_us, bool probe_gain)
 {
 	u64 next_rate_bps = 2 * tsk->snd_cwnd * ndd_get_mss(tsk) * USEC_PER_SEC;
 	do_div(next_rate_bps, ndd->s_min_rtprop_us);
+	if (probe_gain) {
+		// Just after cwnd increase for probe, set pacing rate to new
+		// (probing) cwnd / old RTT, so that the new inflight builds up
+		// slowly over an RTT in an attempt to avoid self induced
+		// oscillations.
+		next_rate_bps = tsk->snd_cwnd * ndd_get_mss(tsk) * USEC_PER_SEC;
+		do_div(next_rate_bps, rtt_us);
+	}
 	sk->sk_pacing_rate = next_rate_bps;
 }
 
@@ -652,7 +660,7 @@ static void start_probe(struct sock *sk, struct ndd_data *ndd,
 	ndd->s_probe->s_probe_first_time_us = 0;
 
 	tsk->snd_cwnd = tsk->snd_cwnd + ndd->s_probe->s_probe_excess_pkts;
-	update_pacing_rate(sk, ndd, tsk, rtt_us);
+	update_pacing_rate(sk, ndd, tsk, rtt_us, true);
 
 	log_probe_start(sk, ndd, tsk, rtt_us, now_us);
 	log_cwnd(PROBE_GAIN, sk, ndd, tsk, rtt_us, now_us);
@@ -676,7 +684,7 @@ static void update_cwnd_drain(struct sock *sk, struct ndd_data *ndd,
 	ndd->s_probe->s_probe_drain_pkts_rem_unit &= P_UNIT - 1;
 
 	tsk->snd_cwnd = tsk->snd_cwnd - this_drain_pkts;
-	update_pacing_rate(sk, ndd, tsk, rtt_us);
+	update_pacing_rate(sk, ndd, tsk, rtt_us, false);
 	log_cwnd(PROBE_DRAIN, sk, ndd, tsk, rtt_us, now_us);
 }
 
@@ -688,7 +696,7 @@ static void initiate_probe_end(struct sock *sk, struct ndd_data *ndd,
 	ndd->s_probe->s_probe_end_initiated = true;
 	if (!p->f_drain_over_rtt) {
 		tsk->snd_cwnd = ndd->s_probe->s_probe_prev_cwnd_pkts;
-		update_pacing_rate(sk, ndd, tsk, rtt_us);
+		update_pacing_rate(sk, ndd, tsk, rtt_us, false);
 		log_cwnd(PROBE_DRAIN, sk, ndd, tsk, rtt_us, now_us);
 	} else {
 		// We are amortizing the decrease over a window, so every ack,
@@ -741,6 +749,7 @@ static void update_probe_state(struct sock *sk, struct ndd_data *ndd,
 		// Conservatively, we wait a full (packet timed) new RTT.
 		// Alternatively, we can just check inflight = cwnd.
 		if (after(last_rcv_seq, ndd->s_probe->s_probe_start_seq)) {
+			update_pacing_rate(sk, ndd, tsk, rtt_us, false);
 			ndd->s_probe->s_probe_inflightmatch_seq = last_snd_seq;
 			if (!p->f_wait_rtt_after_probe) {
 				ndd->s_probe->s_probe_first_seq = last_snd_seq;
@@ -903,7 +912,7 @@ static void update_cwnd(struct sock *sk, struct ndd_data *ndd,
 	next_cwnd = DIV_ROUND_UP_ULL(next_cwnd_unit, P_UNIT);
 	next_cwnd = max_t(u32, next_cwnd, p->p_lb_cwnd_pkts);
 	tsk->snd_cwnd = next_cwnd;
-	update_pacing_rate(sk, ndd, tsk, rtt_us);
+	update_pacing_rate(sk, ndd, tsk, rtt_us, false);
 
 	log_cwnd_update(sk, ndd, tsk, rtt_us, bw_estimate_pps,
 			flow_count_belief_unit, target_flow_count_unit,
@@ -961,7 +970,7 @@ static void slow_start(struct sock *sk, struct tcp_sock *tsk,
 	if (!ndd->s_ss_end_initiated) {
 		if (!should_init_ss_end) {
 			tsk->snd_cwnd = tsk->snd_cwnd + 1;
-			update_pacing_rate(sk, ndd, tsk, rtt_us);
+			update_pacing_rate(sk, ndd, tsk, rtt_us, false);
 			log_cwnd(SLOW_START, sk, ndd, tsk, rtt_us, now_us);
 		} else {
 			// The ACK that showed high delay used a cwnd that is
@@ -970,7 +979,7 @@ static void slow_start(struct sock *sk, struct tcp_sock *tsk,
 			tsk->snd_cwnd = tsk->snd_cwnd / 2;
 			tsk->snd_cwnd =
 				max_t(u32, tsk->snd_cwnd, p->p_lb_cwnd_pkts);
-			update_pacing_rate(sk, ndd, tsk, rtt_us);
+			update_pacing_rate(sk, ndd, tsk, rtt_us, false);
 			log_cwnd(SLOW_START_END, sk, ndd, tsk, rtt_us, now_us);
 			ndd->s_ss_end_initiated = true;
 			ndd->s_ss_last_seq = last_snd_seq;
@@ -1041,7 +1050,7 @@ static void rprobe(struct sock *sk, struct ndd_data *ndd, struct tcp_sock *tsk,
 			ndd->s_rprobe->s_rprobe_end_initiated = true;
 			ndd->s_rprobe->s_rprobe_init_end_time_us = now_us;
 			tsk->snd_cwnd = ndd->s_rprobe->s_rprobe_prev_cwnd_pkts;
-			update_pacing_rate(sk, ndd, tsk, rtt_us);
+			update_pacing_rate(sk, ndd, tsk, rtt_us, false);
 			log_cwnd(RPROBE_REFILL, sk, ndd, tsk, rtt_us, now_us);
 		}
 	} else {
