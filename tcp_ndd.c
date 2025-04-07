@@ -362,18 +362,27 @@ static u32 get_slots_per_round(struct ndd_data *ndd)
 	p_slots_per_round =
 		min_t(u32, p_slots_per_round, p->p_ub_slots_per_round);
 
+	if (ndd->s_round->s_round_min_rtt_us == U32_MAX ||
+	    ndd->s_min_rtprop_us == U32_MAX) {
+		return p_lb_slots_per_round;
+	}
 	return p_slots_per_round;
 }
 
 static void reset_round_state(struct ndd_data *ndd)
 {
+	ndd->s_round->s_round_slots_total = get_slots_per_round(ndd);
+	// ^^ Note: we need to compute this before resetting round min rtt.
 	ndd->s_round->s_round_slots_till_now = 0;
 	ndd->s_round->s_round_min_rtt_us = U32_MAX;
 	ndd->s_round->s_round_max_rate_pps = 0;
-	ndd->s_round->s_round_slots_total = get_slots_per_round(ndd);
 	ndd->s_round->s_round_probe_slot_idx =
-		1 + prandom_u32_max(ndd->s_round->s_round_slots_total);
+		1 + prandom_u32_max(ndd->s_round->s_round_slots_total-1);
 	ndd->s_round->s_round_probed = false;
+	// Rationale for -1 in the input to prandom_u32_max: If there are 6
+	// slots: 0 to 5, we want the slot idx to be in range [1,5]. Note, slot
+	// 0 is not in the range because we do not probe in slot 0 to be able
+	//   to obtain some information in the round.
 }
 
 static void reset_probe_state(struct ndd_data *ndd)
