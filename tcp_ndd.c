@@ -200,8 +200,9 @@ struct ndd_data {
 	"round_min_rtt_us %u round_max_rate_pps %u "                           \
 	"round_slots_till_now %u round_probe_slot_idx %u round_slots_total %u "
 #define ROUND_VARS                                                             \
-	ndd->s_round->s_round_min_rtt_us, ndd->s_round->s_round_max_rate_pps,                    \
-		ndd->s_round->s_round_slots_till_now, ndd->s_round->s_round_probe_slot_idx,      \
+	ndd->s_round->s_round_min_rtt_us, ndd->s_round->s_round_max_rate_pps,  \
+		ndd->s_round->s_round_slots_till_now,                          \
+		ndd->s_round->s_round_probe_slot_idx,                          \
 		ndd->s_round->s_round_slots_total
 #define SLOT_FMT                                                               \
 	"slot_max_qdel_us %u slot_max_rate_pps %u "                            \
@@ -370,7 +371,8 @@ static void reset_round_state(struct ndd_data *ndd)
 	ndd->s_round->s_round_min_rtt_us = U32_MAX;
 	ndd->s_round->s_round_max_rate_pps = 0;
 	ndd->s_round->s_round_slots_total = get_slots_per_round(ndd);
-	ndd->s_round->s_round_probe_slot_idx = 1 + prandom_u32_max(ndd->s_round->s_round_slots_total);
+	ndd->s_round->s_round_probe_slot_idx =
+		1 + prandom_u32_max(ndd->s_round->s_round_slots_total);
 	ndd->s_round->s_round_probed = false;
 }
 
@@ -509,7 +511,8 @@ static u32 get_initial_rtt(struct tcp_sock *tsk)
 }
 
 static void update_pacing_rate(struct sock *sk, struct ndd_data *ndd,
-			       struct tcp_sock *tsk, u32 rtt_us, bool probe_gain)
+			       struct tcp_sock *tsk, u32 rtt_us,
+			       bool probe_gain)
 {
 	u64 next_rate_bps = 2 * tsk->snd_cwnd * ndd_get_mss(tsk) * USEC_PER_SEC;
 	do_div(next_rate_bps, ndd->s_min_rtprop_us);
@@ -536,7 +539,8 @@ static void update_estimates(struct ndd_data *ndd, struct tcp_sock *tsk,
 	ndd->s_min_rtprop_us = min_t(u32, ndd->s_min_rtprop_us, init_rtt_us);
 	ndd->s_min_rtprop_us = min_t(u32, ndd->s_min_rtprop_us, rtt_us);
 
-	ndd->s_round->s_round_min_rtt_us = min_t(u32, ndd->s_round->s_round_min_rtt_us, rtt_us);
+	ndd->s_round->s_round_min_rtt_us =
+		min_t(u32, ndd->s_round->s_round_min_rtt_us, rtt_us);
 	this_qdel = rtt_us - ndd->s_min_rtprop_us;
 
 	if (ndd->s_probe->s_probe_ongoing && part_of_probe(ndd, tsk)) {
@@ -548,8 +552,8 @@ static void update_estimates(struct ndd_data *ndd, struct tcp_sock *tsk,
 		ndd->s_probe->s_probe_min_rtt_us =
 			min_t(u32, ndd->s_probe->s_probe_min_rtt_us, rtt_us);
 	} else if (!ndd->s_probe->s_probe_ongoing) {
-		ndd->s_round->s_round_max_rate_pps =
-			max_t(u64, ndd->s_round->s_round_max_rate_pps, this_rate_pps);
+		ndd->s_round->s_round_max_rate_pps = max_t(
+			u64, ndd->s_round->s_round_max_rate_pps, this_rate_pps);
 	}
 	ndd->s_slot_max_qdel_us =
 		max_t(u32, ndd->s_slot_max_qdel_us, this_qdel);
@@ -582,7 +586,7 @@ static bool cruise_ended(struct ndd_data *ndd, u64 now_us)
 	}
 
 	max_rtt_us = max_rtprop_us + ndd->s_slot_max_qdel_us;
-	
+
 	probe_duration_us = p->p_probe_duration_us;
 	if (p->f_probe_duration_max_rtt) {
 		probe_duration_us = max_rtt_us;
@@ -625,7 +629,8 @@ static bool round_ended(struct ndd_data *ndd)
 
 static bool should_probe(struct ndd_data *ndd)
 {
-	return ndd->s_round->s_round_slots_till_now >= ndd->s_round->s_round_probe_slot_idx;
+	return ndd->s_round->s_round_slots_till_now >=
+	       ndd->s_round->s_round_probe_slot_idx;
 }
 
 static u32 get_probe_excess(struct ndd_data *ndd)
@@ -732,8 +737,7 @@ static void initiate_probe_end(struct sock *sk, struct ndd_data *ndd,
 		// we will reduce by drain_pkts pkts.
 		ndd->s_probe->s_probe_drain_pkts_unit =
 			ndd->s_probe->s_probe_excess_pkts << P_SCALE;
-		do_div(ndd->s_probe->s_probe_drain_pkts_unit,
-		       tsk->snd_cwnd);
+		do_div(ndd->s_probe->s_probe_drain_pkts_unit, tsk->snd_cwnd);
 		ndd->s_probe->s_probe_drain_pkts_rem_unit = 0;
 		update_cwnd_drain(sk, ndd, tsk, rtt_us, now_us, rs);
 	}
@@ -756,8 +760,7 @@ static void update_probe_state(struct sock *sk, struct ndd_data *ndd,
 	u32 max_rtt_us = max_rtprop_us + ndd->s_slot_max_qdel_us;
 
 	u32 wait_time_us = max_rtt_us * p->p_probe_wait_rtts;
-	u64 wait_until_us = ndd->s_probe->s_probe_start_time_us +
-			    wait_time_us;
+	u64 wait_until_us = ndd->s_probe->s_probe_start_time_us + wait_time_us;
 
 	u32 probe_duration_us = p->p_probe_duration_us;
 	if (p->f_probe_duration_max_rtt) {
@@ -889,11 +892,13 @@ static void update_cwnd(struct sock *sk, struct ndd_data *ndd,
 		       ndd->s_probe->s_probe_min_excess_delay_us);
 	}
 
-	flow_count_belief_unit = p->p_ub_flow_count << P_SCALE; // this can be anything as this will never be read.
+	flow_count_belief_unit = p->p_ub_flow_count << P_SCALE;
+	// ^^ this can be anything as this will never be read.
 	if (ndd->s_round->s_round_max_rate_pps > 0) {
 		flow_count_belief_unit = P_UNIT;
 		flow_count_belief_unit *= bw_estimate_pps;
-		do_div(flow_count_belief_unit, ndd->s_round->s_round_max_rate_pps);
+		do_div(flow_count_belief_unit,
+		       ndd->s_round->s_round_max_rate_pps);
 	}
 	flow_count_belief_unit = max_t(u64, flow_count_belief_unit, P_UNIT);
 
@@ -904,7 +909,8 @@ static void update_cwnd(struct sock *sk, struct ndd_data *ndd,
 	// (target_flow_count_unit might be small, so clamps times this might
 	// be same as target_flow_count_unit). We expect cwnd to be large so
 	// that the clamp times cwnd is a different value.
-	if (target_flow_count_unit == 0 || ndd->s_round->s_round_max_rate_pps == 0) {
+	if (target_flow_count_unit == 0 ||
+	    ndd->s_round->s_round_max_rate_pps == 0) {
 		target_cwnd_unit = prev_cwnd * p->p_cwnd_clamp_hi_unit;
 	} else {
 		if (p->f_use_stable_cwnd_update) {
@@ -940,8 +946,8 @@ static void update_cwnd(struct sock *sk, struct ndd_data *ndd,
 	       "ndd cwnd_update_debug flow %u alpha %u 1-alpha %u cwnd %u "
 	       "target_cwnd %llu next_cwnd %llu ",
 	       ndd->id, p->p_cwnd_averaging_factor_unit,
-	       p->p_inv_cwnd_averaging_factor_unit, prev_cwnd
-	       target_cwnd_unit, next_cwnd_unit);
+	       p->p_inv_cwnd_averaging_factor_unit, prev_cwnd target_cwnd_unit,
+	       next_cwnd_unit);
 #endif
 
 	next_cwnd = DIV_ROUND_UP_ULL(next_cwnd_unit, P_UNIT);
@@ -1165,8 +1171,8 @@ static void on_ack(struct sock *sk, const struct rate_sample *rs)
 			log_round_reset(sk, ndd, tsk, rtt_us, now_us);
 		}
 
-		if (ndd->s_round->s_round_slots_till_now >= 1 && !ndd->s_round->s_round_probed &&
-		    should_probe(ndd)) {
+		if (ndd->s_round->s_round_slots_till_now >= 1 &&
+		    !ndd->s_round->s_round_probed && should_probe(ndd)) {
 			ndd->s_round->s_round_probed = true;
 			start_probe(sk, ndd, tsk, rtt_us, now_us,
 				    s_slot_min_rtt_us);
