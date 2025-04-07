@@ -173,6 +173,7 @@ struct ndd_data {
 	u32 s_round_max_rate_pps;
 	u32 s_round_probe_slot_idx;
 	bool s_round_probed;
+	u32 s_round_slots_total;
 	// pps = packets per second, supports range: [1500 bytes per sec to
 	// 6.44 terabytes per second]
 
@@ -192,8 +193,13 @@ struct ndd_data {
 #define BASE_VARS                                                              \
 	ndd->id, now_us, tsk->snd_cwnd, sk->sk_pacing_rate, rtt_us,            \
 		tsk->mss_cache, ndd->s_min_rtprop_us, tsk->packets_out
-#define ROUND_FMT "round_min_rtt_us %u round_max_rate_pps %u "
-#define ROUND_VARS ndd->s_round_min_rtt_us, ndd->s_round_max_rate_pps
+#define ROUND_FMT                                                              \
+	"round_min_rtt_us %u round_max_rate_pps %u "                           \
+	"round_slots_till_now %u round_probe_slot_idx %u round_slots_total %u "
+#define ROUND_VARS                                                             \
+	ndd->s_round_min_rtt_us, ndd->s_round_max_rate_pps,                    \
+		ndd->s_round_slots_till_now, ndd->s_round_probe_slot_idx,      \
+		ndd->s_round_slots_total
 #define SLOT_FMT                                                               \
 	"slot_max_qdel_us %u slot_max_rate_pps %u "                            \
 	"slot_min_rtt_us %u slot_max_rtt_us %u probe_ongoing %u "
@@ -360,7 +366,8 @@ static void reset_round_state(struct ndd_data *ndd)
 	ndd->s_round_slots_till_now = 0;
 	ndd->s_round_min_rtt_us = U32_MAX;
 	ndd->s_round_max_rate_pps = 0;
-	ndd->s_round_probe_slot_idx = 1 + prandom_u32_max(get_slots_per_round(ndd));
+	ndd->s_round_slots_total = get_slots_per_round(ndd);
+	ndd->s_round_probe_slot_idx = 1 + prandom_u32_max(ndd->s_round_slots_total);
 	ndd->s_round_probed = false;
 }
 
@@ -833,6 +840,15 @@ static void log_cwnd_update(struct sock *sk, struct ndd_data *ndd,
 #endif
 }
 
+static void log_round_reset(struct sock *sk, struct ndd_data *ndd,
+			    struct tcp_sock *tsk, u32 rtt_us, u64 now_us)
+{
+#ifdef NDD_LOG_INFO
+	printk(KERN_INFO "ndd round_reset " BASE_FMT ROUND_FMT, BASE_VARS,
+	       ROUND_VARS);
+#endif
+}
+
 static void log_slot_end(struct sock *sk, struct ndd_data *ndd,
 			 struct tcp_sock *tsk, u32 rtt_us, u64 now_us)
 {
@@ -1081,6 +1097,7 @@ static void rprobe(struct sock *sk, struct ndd_data *ndd, struct tcp_sock *tsk,
 			// with a better rtprop estimate.
 			reset_probe_state(ndd);
 			reset_round_state(ndd);
+			log_round_reset(sk, ndd, tsk, rtt_us, now_us);
 			start_new_slot(ndd, now_us);
 		}
 	}
@@ -1141,6 +1158,7 @@ static void on_ack(struct sock *sk, const struct rate_sample *rs)
 
 		if (round_ended(ndd)) {
 			reset_round_state(ndd);
+			log_round_reset(sk, ndd, tsk, rtt_us, now_us);
 		}
 
 		if (ndd->s_round_slots_till_now >= 1 && !ndd->s_round_probed &&
