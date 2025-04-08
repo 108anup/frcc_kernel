@@ -55,6 +55,7 @@ static bool static_f_probe_duration_max_rtt = true;
 static bool static_f_drain_over_rtt = true;
 static bool static_f_probe_over_rtt = true;
 static bool static_f_slot_greater_than_rtprop = true;
+static bool static_f_slot_exactly_rtprop = true;
 
 // Make all parameters runtime configurable
 // https://devarea.com/linux-kernel-development-kernel-module-parameters/
@@ -80,6 +81,7 @@ module_param(static_f_probe_duration_max_rtt, bool, 0660);
 module_param(static_f_drain_over_rtt, bool, 0660);
 module_param(static_f_probe_over_rtt, bool, 0660);
 module_param(static_f_slot_greater_than_rtprop, bool, 0660);
+module_param(static_f_slot_exactly_rtprop, bool, 0660);
 // module_param(static_log_level, uint, 0660);
 
 static u32 id = 0;
@@ -113,6 +115,7 @@ struct param_data {
 	bool f_drain_over_rtt;
 	bool f_probe_over_rtt;
 	bool f_slot_greater_than_rtprop;
+	bool f_slot_exactly_rtprop;
 };
 
 struct probe_data {
@@ -328,6 +331,7 @@ static void init_params(struct sock *sk, struct ndd_data *ndd,
 	p->f_drain_over_rtt = static_f_drain_over_rtt;
 	p->f_probe_over_rtt = static_f_probe_over_rtt;
 	p->f_slot_greater_than_rtprop = static_f_slot_greater_than_rtprop;
+	p->f_slot_exactly_rtprop = static_f_slot_exactly_rtprop;
 
 	log_params(sk, ndd, tsk, now_us);
 }
@@ -593,6 +597,9 @@ static bool cruise_ended(struct ndd_data *ndd, u64 now_us)
 		max_rtprop_us =
 			max_t(u32, ndd->s_min_rtprop_us, p->p_ub_rtprop_us);
 	}
+	if (p->f_slot_exactly_rtprop) {
+		max_rtprop_us = ndd->s_min_rtprop_us;
+	}
 
 	max_rtt_us = max_rtprop_us + ndd->s_slot_max_qdel_us;
 
@@ -766,6 +773,12 @@ static void update_probe_state(struct sock *sk, struct ndd_data *ndd,
 	u64 end_seq_snd_time;
 
 	u32 max_rtprop_us = max_t(u32, p->p_ub_rtprop_us, ndd->s_min_rtprop_us);
+	// Note, in cruise ended, we check if we are using
+	// f_slot_greater_than_rtprop, but here for our own flow we definitely
+	// want the probe to be bigger.
+	if (p->f_slot_exactly_rtprop) {
+		max_rtprop_us = ndd->s_min_rtprop_us;
+	}
 	u32 max_rtt_us = max_rtprop_us + ndd->s_slot_max_qdel_us;
 
 	u32 wait_time_us = max_rtt_us * p->p_probe_wait_rtts;
