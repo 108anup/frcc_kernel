@@ -67,14 +67,14 @@ DEFAULT_VALUES = {
 MODULE_PATH = "/sys/module/tcp_ndd/parameters/"
 
 
-def set_kernel_param(name, value):
-    """Writes the given value to the corresponding kernel module parameter."""
-    pname = f"static_{name}"
-    param_path = os.path.join(MODULE_PATH, pname)
+def get_param_name(param):
+    return f"static_{param}"
 
-    # For boolean params, convert to 'Y' or 'N'
-    if PARAMS[name] == bool:
-        value = "Y" if value else "N"
+
+def set_kernel_param(param, value):
+    """Writes the given value to the corresponding kernel module parameter."""
+    name = get_param_name(param)
+    param_path = os.path.join(MODULE_PATH, name)
 
     try:
         # Use sudo tee to write values
@@ -85,22 +85,65 @@ def set_kernel_param(name, value):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL
         )
-        print(f"Set {name} = {value}")
+        print(f"Set {param} = {value}")
     except subprocess.CalledProcessError:
-        print(f"Error setting {name}. Check if the module is loaded and path exists.")
+        print(f"Error setting {param}. Check if the module is loaded and path exists.")
+
+
+def get_kernel_param(param):
+    name = get_param_name(param)
+    param_path = os.path.join(MODULE_PATH, name)
+    try:
+        with open(param_path, "r") as f:
+            value = f.read().strip()
+            return value
+    except FileNotFoundError:
+        print(f"Error: {param} not found. Check if the module is loaded.")
 
 
 def print_kernel_params():
     """Reads and prints all kernel module parameters."""
     for param in PARAMS.keys():
-        pname = f"static_{param}"
-        param_path = os.path.join(MODULE_PATH, pname)
-        try:
-            with open(param_path, "r") as f:
-                value = f.read().strip()
-                print(f"{param} = {value}")
-        except FileNotFoundError:
-            print(f"Error: {param} not found. Check if the module is loaded.")
+        value = get_kernel_param(param)
+        if value != str(DEFAULT_VALUES[param]):
+            print(f"{param} = {value} (default: {DEFAULT_VALUES[param]})")
+        else:
+            print(f"{param} = {value}")
+
+
+def get_write_value(args, param):
+    param_type = PARAMS[param]
+    env_var = f"TCP_NDD_{param.upper()}"
+    value = getattr(args, param, None)  # CLI argument
+
+    if value is None and env_var in os.environ:
+        # Convert environment variable to correct format
+        env_value = os.environ[env_var]
+        if param_type is bool:
+            value = env_value.lower() in ("1", "true", "yes")
+        else:
+            value = param_type(env_value)
+
+    # For boolean params, convert to 'Y' or 'N'
+    if value is not None:
+        if param_type is bool:
+            value = "Y" if value else "N"
+
+    return value
+
+
+def check_params(args):
+    """Checks that the params have been set as specified in the env vars"""
+    for param in PARAMS.keys():
+        read_value = get_kernel_param(param)
+        write_value = get_write_value(args, param)
+        if write_value is not None:
+            write_value = str(write_value)
+            assert read_value == write_value, f"Mismatch for {param}: read {read_value}, expected {write_value}"
+        else:
+            default_value = str(DEFAULT_VALUES[param])
+            assert read_value == default_value, f"Mismatch for {param}: read {read_value}, expected {default_value}"
+    print("All parameters are set correctly.")
 
 
 def reset_all_params():
@@ -114,6 +157,7 @@ def main():
     parser = argparse.ArgumentParser(description="Set kernel module parameters for tcp_ndd.")
     parser.add_argument("--print", action="store_true", help="Print all current kernel parameters")
     parser.add_argument("--reset", action="store_true", help="Reset all parameters to default values")
+    parser.add_argument("--check", action="store_true", help="Check that all values are set according to cli or env vars")
 
     for param, param_type in PARAMS.items():
         parser.add_argument(f"--{param}", type=param_type, help=f"Set {param}")
@@ -128,18 +172,13 @@ def main():
         reset_all_params()
         return
 
+    if args.check:
+        check_params(args)
+        return
+
+    # import pdb; pdb.set_trace()
     for param, param_type in PARAMS.items():
-        env_var = f"TCP_NDD_{param.upper()}"
-        value = getattr(args, param, None)  # CLI argument
-
-        if value is None and env_var in os.environ:
-            # Convert environment variable to correct type
-            env_value = os.environ[env_var]
-            if param_type == bool:
-                value = env_value.lower() in ("1", "true", "yes")
-            else:
-                value = param_type(env_value)
-
+        value = get_write_value(args, param)
         if value is not None:
             set_kernel_param(param, value)
 
