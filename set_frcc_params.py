@@ -64,7 +64,7 @@ DEFAULT_VALUES = {
     "f_slot_greater_than_rtprop": "Y",
 }
 
-MODULE_PATH = "/sys/module/tcp_ndd/parameters/"
+MODULE_PATH = "/sys/module/tcp_frcc/parameters/"
 
 
 def get_param_name(param):
@@ -113,7 +113,7 @@ def print_kernel_params():
 
 def get_write_value(args, param):
     param_type = PARAMS[param]
-    env_var = f"TCP_NDD_{param.upper()}"
+    env_var = f"TCP_FRCC_{param.upper()}"
     value = getattr(args, param, None)  # CLI argument
 
     if value is None and env_var in os.environ:
@@ -154,7 +154,7 @@ def reset_all_params():
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Set kernel module parameters for tcp_ndd.")
+    parser = argparse.ArgumentParser(description="Set kernel module parameters for tcp_frcc.")
     parser.add_argument("--print", action="store_true", help="Print all current kernel parameters")
     parser.add_argument("--reset", action="store_true", help="Reset all parameters to default values")
     parser.add_argument("--check", action="store_true", help="Check that all values are set according to cli or env vars")

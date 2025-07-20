@@ -2,7 +2,7 @@
   {
     "arguments": [
       "/usr/bin/gcc",
-      "-Wp,-MMD,/home/anupa/Projects/fairCC/ndd-kernel/.tcp_ndd.o.d",
+      "-Wp,-MMD,/home/anupa/Projects/fairCC/ndd-kernel/.tcp_frcc.o.d",
       "-nostdinc",
       "-isystem",
       "/usr/lib/gcc/x86_64-linux-gnu/11/include",
@@ -99,22 +99,22 @@
       "-fsanitize=bool",
       "-fsanitize=enum",
       "-DMODULE",
-      "-DKBUILD_BASENAME=\"tcp_ndd\"",
-      "-DKBUILD_MODNAME=\"tcp_ndd\"",
-      "-D__KBUILD_MODNAME=kmod_tcp_ndd",
+      "-DKBUILD_BASENAME=\"tcp_frcc\"",
+      "-DKBUILD_MODNAME=\"tcp_frcc\"",
+      "-D__KBUILD_MODNAME=kmod_tcp_frcc",
       "-c",
       "-o",
-      "/home/anupa/Projects/fairCC/ndd-kernel/tcp_ndd.o",
-      "/home/anupa/Projects/fairCC/ndd-kernel/tcp_ndd.c"
+      "/home/anupa/Projects/fairCC/ndd-kernel/tcp_frcc.o",
+      "/home/anupa/Projects/fairCC/ndd-kernel/tcp_frcc.c"
     ],
-    "directory": "/usr/src/linux-headers-5.15.0-134-generic",
-    "file": "/home/anupa/Projects/fairCC/ndd-kernel/tcp_ndd.c",
-    "output": "/home/anupa/Projects/fairCC/ndd-kernel/tcp_ndd.o"
+    "directory": "/usr/src/linux-headers-5.15.0-142-generic",
+    "file": "/home/anupa/Projects/fairCC/ndd-kernel/tcp_frcc.c",
+    "output": "/home/anupa/Projects/fairCC/ndd-kernel/tcp_frcc.o"
   },
   {
     "arguments": [
       "/usr/bin/gcc",
-      "-Wp,-MMD,/home/anupa/Projects/fairCC/ndd-kernel/.tcp_ndd.mod.o.d",
+      "-Wp,-MMD,/home/anupa/Projects/fairCC/ndd-kernel/.tcp_frcc.mod.o.d",
       "-nostdinc",
       "-isystem",
       "/usr/lib/gcc/x86_64-linux-gnu/11/include",
@@ -214,16 +214,16 @@
       "-fsanitize=bool",
       "-fsanitize=enum",
       "-DMODULE",
-      "-DKBUILD_BASENAME=\"tcp_ndd.mod\"",
-      "-DKBUILD_MODNAME=\"tcp_ndd\"",
-      "-D__KBUILD_MODNAME=kmod_tcp_ndd",
+      "-DKBUILD_BASENAME=\"tcp_frcc.mod\"",
+      "-DKBUILD_MODNAME=\"tcp_frcc\"",
+      "-D__KBUILD_MODNAME=kmod_tcp_frcc",
       "-c",
       "-o",
-      "/home/anupa/Projects/fairCC/ndd-kernel/tcp_ndd.mod.o",
-      "/home/anupa/Projects/fairCC/ndd-kernel/tcp_ndd.mod.c"
+      "/home/anupa/Projects/fairCC/ndd-kernel/tcp_frcc.mod.o",
+      "/home/anupa/Projects/fairCC/ndd-kernel/tcp_frcc.mod.c"
     ],
-    "directory": "/usr/src/linux-headers-5.15.0-134-generic",
-    "file": "/home/anupa/Projects/fairCC/ndd-kernel/tcp_ndd.mod.c",
-    "output": "/home/anupa/Projects/fairCC/ndd-kernel/tcp_ndd.mod.o"
+    "directory": "/usr/src/linux-headers-5.15.0-142-generic",
+    "file": "/home/anupa/Projects/fairCC/ndd-kernel/tcp_frcc.mod.c",
+    "output": "/home/anupa/Projects/fairCC/ndd-kernel/tcp_frcc.mod.o"
   }
 ]

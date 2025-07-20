@@ -4,7 +4,7 @@ ifneq ($(KERNELRELEASE),)
 # ccflags-y := $(ccflags-y) -xc -E -v
 
 # kbuild part of makefile
-obj-m  := tcp_ndd.o
+obj-m  := tcp_frcc.o
 
 else
 # normal makefile
