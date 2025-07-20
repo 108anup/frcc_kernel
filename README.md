@@ -21,4 +21,6 @@ flows that are started after the script is run.
 2. To get clangd language server to recognize dependencies, generate compile_commands.json using:
 ```bash
 sudo apt install bear
+bear -- make
 ```
+This will create a `compile_commands.json` file, which can be used by clangd for code completion and navigation. Move this to the `build` directory. You may need to delete some lines in this file. `diff` with the existing `build/compile_commands.json` to see which lines to remove.
